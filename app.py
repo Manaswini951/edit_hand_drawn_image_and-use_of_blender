@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 import math
@@ -31,9 +32,9 @@ st.title("🦒 Hand-Drawn Animal Walk Animator — Blender 3D")
 
 st.caption(
     "Gemini identifies the COMPLETE visible animal and its anatomy. "
-    "The original drawing is then converted into separate Blender body "
-    "and limb meshes, lightly extruded into 3D, rigged at anatomical "
-    "pivots and animated using Blender."
+    "The original drawing is separated into body and visible limbs, "
+    "then Blender creates a 2.5D animated character while preserving "
+    "the original artwork."
 )
 
 
@@ -53,8 +54,7 @@ BLENDER_PATH = st.sidebar.text_input(
     value="",
     help=(
         "Leave empty to automatically search for Blender. "
-        "Example Windows path: "
-        "C:\\Program Files\\Blender Foundation\\Blender 4.5\\blender.exe"
+        "Example: C:\\Program Files\\Blender Foundation\\Blender 4.5\\blender.exe"
     ),
 )
 
@@ -183,17 +183,17 @@ BLENDER_BEVEL = st.sidebar.slider(
 # SESSION STATE
 # ============================================================
 
-if "scene" not in st.session_state:
-    st.session_state.scene = None
+DEFAULT_STATE = {
+    "scene": None,
+    "animal_prepared": None,
+    "blender_script": None,
+    "blender_result": None,
+    "blender_frames": None,
+}
 
-if "animal_data" not in st.session_state:
-    st.session_state.animal_data = None
-
-if "blender_script" not in st.session_state:
-    st.session_state.blender_script = None
-
-if "blender_result" not in st.session_state:
-    st.session_state.blender_result = None
+for key, value in DEFAULT_STATE.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 
 
 # ============================================================
@@ -201,11 +201,9 @@ if "blender_result" not in st.session_state:
 # ============================================================
 
 def clean_json_text(text: str) -> str:
-
     text = (text or "").strip()
 
     if text.startswith("```"):
-
         lines = text.splitlines()
 
         if lines and lines[0].startswith("```"):
@@ -220,14 +218,11 @@ def clean_json_text(text: str) -> str:
 
 
 def model_name(obj: Any) -> str:
-
     name = getattr(obj, "name", "") or ""
-
     return str(name).strip()
 
 
 def model_actions(obj: Any) -> List[str]:
-
     actions = getattr(
         obj,
         "supported_actions",
@@ -250,14 +245,10 @@ def model_actions(obj: Any) -> List[str]:
         return []
 
 
-def discover_models(
-    client: genai.Client,
-) -> List[str]:
-
+def discover_models(client: genai.Client) -> List[str]:
     discovered = []
 
     try:
-
         for model_obj in client.models.list():
 
             name = model_name(model_obj)
@@ -283,16 +274,13 @@ def discover_models(
         key = name.lower()
 
         if key not in seen:
-
             seen.add(key)
             unique.append(name)
 
     return unique
 
 
-def model_score(
-    name: str,
-) -> Tuple[int, str]:
+def model_score(name: str) -> Tuple[int, str]:
 
     n = name.lower().replace(
         "models/",
@@ -341,9 +329,7 @@ def model_score(
     return 100, n
 
 
-def safe_text(
-    response: Any,
-) -> str:
+def safe_text(response: Any) -> str:
 
     text = getattr(
         response,
@@ -389,13 +375,9 @@ def safe_text(
                 )
 
                 if part_text:
-                    pieces.append(
-                        str(part_text)
-                    )
+                    pieces.append(str(part_text))
 
-        return "\n".join(
-            pieces
-        ).strip()
+        return "\n".join(pieces).strip()
 
     except Exception:
 
@@ -433,22 +415,18 @@ def analyze_scene(
 
         return None
 
-    discovered = discover_models(
-        client
-    )
+    discovered = discover_models(client)
 
     if not discovered:
 
         st.error(
-            "Gemini API did not return any "
-            "models supporting generateContent."
+            "Gemini API did not return any models "
+            "supporting generateContent."
         )
 
         return None
 
-    discovered.sort(
-        key=model_score
-    )
+    discovered.sort(key=model_score)
 
     prompt = r"""
 You are analyzing a SINGLE hand-drawn animal scene.
@@ -458,8 +436,8 @@ The animal will later be imported into Blender and animated.
 The goal is NOT to redraw the animal.
 
 The goal is to provide highly accurate geometry so the ORIGINAL
-drawing can be separated into a complete body and individual visible
-limbs.
+drawing can be separated into a complete animal and individual
+visible limbs.
 
 ============================================================
 HIGHEST PRIORITY — COMPLETE ANIMAL RECOGNITION
@@ -474,6 +452,7 @@ Include, when visible:
 
 - entire body
 - head
+- neck
 - muzzle/nose
 - every visible ear
 - tiny ear tips
@@ -490,7 +469,7 @@ Include, when visible:
 - claws
 - toes
 - thin appendages
-- any other visible anatomical component
+- other visible anatomy
 
 DO NOT omit small parts.
 
@@ -502,40 +481,36 @@ DO NOT invent hidden limbs.
 BLENDER REQUIREMENT
 ============================================================
 
-The animal will become a 2.5D/3D Blender character.
+The animal will become a 2.5D Blender character.
 
 Therefore:
 
-1. The complete animal polygon must contain every visible
+1. The complete animal polygon must contain EVERY visible
    animal component.
 
-2. Body geometry should represent the central body/head/neck
-   mass but MUST NOT deliberately exclude small attached
-   anatomy from the complete animal boundary.
+2. Every visible leg must be identified separately.
 
-3. Every visible leg must be identified separately.
-
-4. Every visible leg must have:
+3. Every visible leg must have:
 
    proximal
    middle
    distal
 
-5. The proximal point must be the most useful anatomical pivot
-   for Blender animation.
+4. The proximal point must be the best anatomical rotation
+   point for Blender.
 
-6. The leg polygon should tightly cover the ORIGINAL visible
-   leg pixels.
+5. Leg polygons must tightly cover the original visible
+   leg artwork.
 
-7. Do not invent legs hidden behind the body.
+6. Do not invent legs hidden behind the body.
 
-8. Small ears, tail tips, paws, horns and other details do not
-   need animation joints, but MUST remain inside the complete
-   animal boundary.
+7. Small ears, tail tips, paws, horns and other details do
+   not need animation joints, but MUST remain inside the
+   complete animal boundary.
 
-9. The original pixels will be used as textures.
+8. Original pixels will be used as textures.
 
-10. DO NOT redraw or beautify the animal.
+9. Do not redraw or beautify the animal.
 
 ============================================================
 COORDINATES
@@ -546,13 +521,15 @@ Coordinates must be normalized 0..100.
 Use [y,x].
 
 ============================================================
-COMPLETE-ANIMAL AUDIT
+COMPLETE ANIMAL AUDIT
 ============================================================
 
 Before returning JSON, inspect:
 
 - head
 - muzzle
+- neck
+- entire body
 - both sides of body
 - every visible ear
 - every visible leg
@@ -630,7 +607,6 @@ Structure:
         "distal": [y,x]
       }
     }
-
   ],
 
   "notes": "short description"
@@ -680,27 +656,23 @@ If no animal is visible:
 
             try:
 
-                response = (
-                    client.models.generate_content(
-                        model=current_model,
-                        contents=contents,
-                        config=types.GenerateContentConfig(
-                            response_mime_type="application/json",
-                            temperature=0.05,
-                        ),
-                    )
+                response = client.models.generate_content(
+                    model=current_model,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.05,
+                    ),
                 )
 
             except Exception:
 
-                response = (
-                    client.models.generate_content(
-                        model=current_model,
-                        contents=contents,
-                        config=types.GenerateContentConfig(
-                            temperature=0.05,
-                        ),
-                    )
+                response = client.models.generate_content(
+                    model=current_model,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        temperature=0.05,
+                    ),
                 )
 
             text = clean_json_text(
@@ -714,10 +686,7 @@ If no animal is visible:
 
             data = json.loads(text)
 
-            if not isinstance(
-                data,
-                dict,
-            ):
+            if not isinstance(data, dict):
                 raise ValueError(
                     "Gemini response was not a JSON object."
                 )
@@ -736,13 +705,10 @@ If no animal is visible:
             )
 
     st.error(
-        "Gemini analysis failed after trying all "
-        "available models."
+        "Gemini analysis failed after trying all available models."
     )
 
-    with st.expander(
-        "Show model attempts"
-    ):
+    with st.expander("Show model attempts"):
 
         for error in errors:
             st.code(error)
@@ -751,7 +717,7 @@ If no animal is visible:
 
 
 # ============================================================
-# GEOMETRY HELPERS
+# GEOMETRY
 # ============================================================
 
 def pt_px(
@@ -777,8 +743,8 @@ def pt_px(
     )
 
     return (
-        int(x * width / 100.0),
-        int(y * height / 100.0),
+        int(round(x * width / 100.0)),
+        int(round(y * height / 100.0)),
     )
 
 
@@ -793,10 +759,7 @@ def poly_px(
     for p in polygon:
 
         if (
-            isinstance(
-                p,
-                (list, tuple),
-            )
+            isinstance(p, (list, tuple))
             and len(p) >= 2
         ):
 
@@ -806,9 +769,7 @@ def poly_px(
                 height,
             )
 
-            pts.append(
-                [x, y]
-            )
+            pts.append([x, y])
 
     if len(pts) < 3:
 
@@ -890,9 +851,7 @@ def bbox_poly(
             height,
         )
 
-    x, y, bw, bh = cv2.boundingRect(
-        pts
-    )
+    x, y, bw, bh = cv2.boundingRect(pts)
 
     return (
         max(0, x - margin),
@@ -903,7 +862,7 @@ def bbox_poly(
 
 
 # ============================================================
-# FOREGROUND / ORIGINAL PIXEL EXTRACTION
+# FOREGROUND EXTRACTION
 # ============================================================
 
 def ink_mask(
@@ -918,39 +877,30 @@ def ink_mask(
         cv2.COLOR_BGR2HSV,
     )
 
-    _, S, V = cv2.split(
-        hsv
-    )
+    _, saturation, value = cv2.split(hsv)
 
-    colored = S > 35
+    colored = saturation > 30
 
     strong_color = (
-        (S > 55)
-        & (V > 45)
+        (saturation > 50)
+        & (value > 35)
     )
 
     color_support = cv2.dilate(
-        strong_color.astype(
-            np.uint8
-        ),
+        strong_color.astype(np.uint8),
         np.ones(
             (5, 5),
             np.uint8,
         ),
     ) > 0
 
-    dark = V < 145
+    dark = value < 175
 
     if shadow_suppress:
 
-        dark_attached = (
-            dark
-            & color_support
-        )
-
         foreground = (
             colored
-            | dark_attached
+            | (dark & color_support)
         )
 
     else:
@@ -961,9 +911,7 @@ def ink_mask(
         )
 
     foreground = (
-        foreground.astype(
-            np.uint8
-        )
+        foreground.astype(np.uint8)
         * 255
     )
 
@@ -983,22 +931,100 @@ def ink_mask(
 
     if dilation > 0:
 
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (
+                dilation * 2 + 1,
+                dilation * 2 + 1,
+            ),
+        )
+
         foreground = cv2.dilate(
             foreground,
-            cv2.getStructuringElement(
-                cv2.MORPH_ELLIPSE,
-                (
-                    dilation * 2 + 1,
-                    dilation * 2 + 1,
-                ),
-            ),
+            kernel,
         )
 
     return foreground
 
 
 # ============================================================
-# PREPARE BLENDER PART DATA
+# COMPLETE ANIMAL PIXEL MASK
+# ============================================================
+
+def complete_animal_mask(
+    image_bgr: np.ndarray,
+    scene: Dict[str, Any],
+) -> np.ndarray:
+
+    h, w = image_bgr.shape[:2]
+
+    polygon = (
+        scene.get("animal_polygon")
+        or []
+    )
+
+    if len(polygon) < 3:
+        return np.zeros(
+            (h, w),
+            dtype=np.uint8,
+        )
+
+    animal_region = poly_mask(
+        (h, w),
+        polygon,
+        dilation=max(
+            2,
+            INK_DILATION,
+        ),
+    )
+
+    pixels = ink_mask(
+        image_bgr,
+        animal_region,
+        shadow_suppress=SHADOW_SUPPRESSION,
+        dilation=INK_DILATION,
+    )
+
+    # Keep the complete Gemini polygon as a protective mask.
+    # This is important for tiny white/low-saturation parts.
+    protected = animal_region.copy()
+
+    # Combine detected artwork with the complete Gemini boundary.
+    #
+    # The polygon is slightly eroded only where there is absolutely
+    # no artwork, preventing the entire interior background from
+    # becoming opaque.
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (5, 5),
+    )
+
+    interior = cv2.erode(
+        animal_region,
+        kernel,
+    )
+
+    result = pixels.copy()
+
+    result[interior > 0] = np.maximum(
+        result[interior > 0],
+        pixels[interior > 0],
+    )
+
+    # Keep the outer boundary around all detected artwork.
+    result = cv2.bitwise_or(
+        result,
+        cv2.bitwise_and(
+            protected,
+            pixels,
+        ),
+    )
+
+    return result
+
+
+# ============================================================
+# LEG DISCOVERY
 # ============================================================
 
 def leg_parts(
@@ -1012,10 +1038,7 @@ def leg_parts(
         [],
     ):
 
-        if not isinstance(
-            part,
-            dict,
-        ):
+        if not isinstance(part, dict):
             continue
 
         ptype = str(
@@ -1042,10 +1065,13 @@ def leg_parts(
     return result
 
 
-def prepare_blender_part(
+# ============================================================
+# PREPARE LEG SPRITES
+# ============================================================
+
+def prepare_leg_sprite(
     image_bgr: np.ndarray,
     polygon: List[List[float]],
-    dilation: int = 3,
 ) -> Optional[Dict[str, Any]]:
 
     h, w = image_bgr.shape[:2]
@@ -1053,20 +1079,20 @@ def prepare_blender_part(
     if len(polygon) < 3:
         return None
 
-    region_mask = poly_mask(
+    region = poly_mask(
         (h, w),
         polygon,
         dilation=max(
             2,
-            dilation,
+            INK_DILATION,
         ),
     )
 
     mask = ink_mask(
         image_bgr,
-        region_mask,
+        region,
         shadow_suppress=SHADOW_SUPPRESSION,
-        dilation=dilation,
+        dilation=INK_DILATION,
     )
 
     x1, y1, x2, y2 = bbox_poly(
@@ -1074,19 +1100,19 @@ def prepare_blender_part(
         w,
         h,
         margin=max(
-            10,
-            min(h, w) // 80,
+            8,
+            min(h, w) // 100,
         ),
     )
 
     crop = image_bgr[
         y1:y2,
-        x1:x2
+        x1:x2,
     ].copy()
 
     local_mask = mask[
         y1:y2,
-        x1:x2
+        x1:x2,
     ].copy()
 
     if crop.size == 0:
@@ -1099,15 +1125,197 @@ def prepare_blender_part(
 
     rgba[:, :, 3] = local_mask
 
+    joints = {}
+
+    # Convert Gemini joints into pixel coordinates.
+    for key in (
+        "proximal",
+        "middle",
+        "distal",
+    ):
+
+        p = (
+            (
+                current_part.get("joints", {})
+                or {}
+            ).get(key)
+        )
+
+        if p is not None:
+
+            gx, gy = pt_px(
+                p,
+                w,
+                h,
+            )
+
+            joints[key] = [
+                int(gx),
+                int(gy),
+            ]
+
     return {
-        "bbox": (
-            x1,
-            y1,
-            x2,
-            y2,
+        "name": str(
+            current_part.get(
+                "name",
+                "leg",
+            )
         ),
+        "side": str(
+            current_part.get(
+                "side",
+                current_part.get(
+                    "name",
+                    "",
+                ),
+            )
+        ).lower(),
+        "bbox": [
+            int(x1),
+            int(y1),
+            int(x2),
+            int(y2),
+        ],
+        "joints": joints,
         "rgba": rgba,
-        "polygon": polygon,
+    }
+
+
+# ============================================================
+# BODY SPRITE
+# ============================================================
+
+def prepare_body_sprite(
+    image_bgr: np.ndarray,
+    scene: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+
+    h, w = image_bgr.shape[:2]
+
+    animal_polygon = (
+        scene.get("animal_polygon")
+        or []
+    )
+
+    if len(animal_polygon) < 3:
+        return None
+
+    animal_mask = complete_animal_mask(
+        image_bgr,
+        scene,
+    )
+
+    x1, y1, x2, y2 = bbox_poly(
+        animal_polygon,
+        w,
+        h,
+        margin=max(
+            12,
+            min(h, w) // 70,
+        ),
+    )
+
+    crop = image_bgr[
+        y1:y2,
+        x1:x2,
+    ].copy()
+
+    alpha = animal_mask[
+        y1:y2,
+        x1:x2,
+    ].copy()
+
+    if crop.size == 0:
+        return None
+
+    # Remove the movable legs from the body.
+    #
+    # We keep a small proximal attachment area so the leg still
+    # appears connected to the torso.
+    for part in leg_parts(scene):
+
+        polygon = (
+            part.get("polygon")
+            or []
+        )
+
+        if len(polygon) < 3:
+            continue
+
+        leg_mask_full = poly_mask(
+            (h, w),
+            polygon,
+            dilation=max(
+                1,
+                INK_DILATION,
+            ),
+        )
+
+        # Remove most of the leg but leave a proximal area.
+        joints = (
+            part.get("joints")
+            or {}
+        )
+
+        proximal = joints.get(
+            "proximal"
+        )
+
+        if proximal:
+
+            px, py = pt_px(
+                proximal,
+                w,
+                h,
+            )
+
+            yy, xx = np.ogrid[
+                :h,
+                :w,
+            ]
+
+            radius = max(
+                8,
+                int(
+                    min(h, w) * 0.025
+                ),
+            )
+
+            keep_attachment = (
+                (xx - px) ** 2
+                + (yy - py) ** 2
+                <= radius ** 2
+            )
+
+            leg_mask_full[
+                keep_attachment
+            ] = 0
+
+        alpha = cv2.bitwise_and(
+            alpha,
+            cv2.bitwise_not(
+                leg_mask_full[
+                    y1:y2,
+                    x1:x2,
+                ]
+            ),
+        )
+
+    rgba = cv2.cvtColor(
+        crop,
+        cv2.COLOR_BGR2RGBA,
+    )
+
+    rgba[:, :, 3] = alpha
+
+    return {
+        "bbox": [
+            int(x1),
+            int(y1),
+            int(x2),
+            int(y2),
+        ],
+        "rgba": rgba,
     }
 
 
@@ -1217,6 +1425,77 @@ def detection_overlay(
 
 
 # ============================================================
+# PREPARE COMPLETE BLENDER DATA
+# ============================================================
+
+def prepare_animal_for_blender(
+    image_bgr: np.ndarray,
+    scene: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+
+    body = prepare_body_sprite(
+        image_bgr,
+        scene,
+    )
+
+    if body is None:
+        return None
+
+    prepared_legs = []
+
+    for part in leg_parts(scene):
+
+        global current_part
+        current_part = part
+
+        prepared = prepare_leg_sprite(
+            image_bgr,
+            part.get(
+                "polygon",
+                [],
+            )
+            or [],
+        )
+
+        if prepared is not None:
+            prepared_legs.append(prepared)
+
+    return {
+        "image_width": int(
+            image_bgr.shape[1]
+        ),
+        "image_height": int(
+            image_bgr.shape[0]
+        ),
+        "body": body,
+        "legs": prepared_legs,
+    }
+
+
+# ============================================================
+# PNG / BASE64 HELPERS
+# ============================================================
+
+def rgba_to_base64(
+    rgba: np.ndarray,
+) -> str:
+
+    ok, encoded = cv2.imencode(
+        ".png",
+        rgba,
+    )
+
+    if not ok:
+        raise ValueError(
+            "Could not encode RGBA sprite as PNG."
+        )
+
+    return base64.b64encode(
+        encoded.tobytes()
+    ).decode("ascii")
+
+
+# ============================================================
 # BLENDER DISCOVERY
 # ============================================================
 
@@ -1234,7 +1513,7 @@ def find_blender(
             configured_path
         )
 
-        if p.exists():
+        if p.exists() and p.is_file():
             return str(p)
 
     found = shutil.which(
@@ -1244,17 +1523,53 @@ def find_blender(
     if found:
         return found
 
-    windows_candidates = [
-        r"C:\Program Files\Blender Foundation\Blender\blender.exe",
-        r"C:\Program Files\Blender Foundation\Blender 4.5\blender.exe",
-        r"C:\Program Files\Blender Foundation\Blender 4.4\blender.exe",
-        r"C:\Program Files\Blender Foundation\Blender 4.3\blender.exe",
-        r"C:\Program Files\Blender Foundation\Blender 4.2\blender.exe",
-        r"C:\Program Files\Blender Foundation\Blender 4.1\blender.exe",
-        r"C:\Program Files\Blender Foundation\Blender 4.0\blender.exe",
+    windows_roots = [
+        r"C:\Program Files\Blender Foundation",
+        r"C:\Program Files",
     ]
 
-    for candidate in windows_candidates:
+    for root in windows_roots:
+
+        root_path = Path(root)
+
+        if not root_path.exists():
+            continue
+
+        try:
+
+            candidates = list(
+                root_path.glob(
+                    "Blender*/blender.exe"
+                )
+            )
+
+            candidates.sort(
+                reverse=True
+            )
+
+            if candidates:
+                return str(
+                    candidates[0]
+                )
+
+        except Exception:
+            pass
+
+    mac_candidates = [
+        "/Applications/Blender.app/Contents/MacOS/Blender",
+    ]
+
+    for candidate in mac_candidates:
+
+        if os.path.exists(candidate):
+            return candidate
+
+    linux_candidates = [
+        "/usr/bin/blender",
+        "/snap/bin/blender",
+    ]
+
+    for candidate in linux_candidates:
 
         if os.path.exists(candidate):
             return candidate
@@ -1263,13 +1578,76 @@ def find_blender(
 
 
 # ============================================================
-# BLENDER PYTHON SCRIPT GENERATOR
+# FRAME ALLOCATION
+# ============================================================
+
+def allocate_frames(
+    total: int,
+) -> Tuple[int, int, int, int]:
+
+    if ANIMATION_MODE == "Walk in place only":
+
+        return (
+            0,
+            total,
+            0,
+            0,
+        )
+
+    walk_n = int(
+        round(
+            total
+            * WALK_IN_FRACTION
+        )
+    )
+
+    stand_n = int(
+        round(
+            total
+            * STAND_FRACTION
+        )
+    )
+
+    merge_n = 0
+
+    if (
+        ANIMATION_MODE
+        == "White canvas → walk in → stand → merge"
+    ):
+
+        merge_n = int(
+            round(
+                total
+                * MERGE_FRACTION
+            )
+        )
+
+    intro_n = max(
+        0,
+        total
+        - walk_n
+        - stand_n
+        - merge_n,
+    )
+
+    return (
+        intro_n,
+        walk_n,
+        stand_n,
+        merge_n,
+    )
+
+
+# ============================================================
+# BLENDER SCRIPT GENERATOR
+#
+# IMPORTANT:
+# This function intentionally does NOT use an f-string.
+# Therefore Blender dictionaries such as {} are safe.
 # ============================================================
 
 def generate_blender_script(
-    image_path: str,
-    output_path: str,
-    scene_json_path: str,
+    prepared: Dict[str, Any],
 ) -> str:
 
     resolution_map = {
@@ -1278,11 +1656,16 @@ def generate_blender_script(
         "1024 × 1024": 1024,
     }
 
-    resolution = resolution_map[
-        BLENDER_RESOLUTION
-    ]
+    resolution = resolution_map.get(
+        BLENDER_RESOLUTION,
+        768,
+    )
+
+    body = prepared["body"]
 
     config = {
+        "image_width": prepared["image_width"],
+        "image_height": prepared["image_height"],
         "total_frames": TOTAL_FRAMES,
         "fps": FPS,
         "walk_cycles": WALK_CYCLES,
@@ -1299,28 +1682,89 @@ def generate_blender_script(
         "animation_mode": ANIMATION_MODE,
     }
 
-    config_json = json.dumps(
-        config
+    assets = {
+        "body": {
+            "bbox": body["bbox"],
+            "png_b64": rgba_to_base64(
+                body["rgba"]
+            ),
+        },
+        "legs": [],
+    }
+
+    for leg in prepared["legs"]:
+
+        assets["legs"].append(
+            {
+                "name": leg["name"],
+                "side": leg["side"],
+                "bbox": leg["bbox"],
+                "joints": leg["joints"],
+                "png_b64": rgba_to_base64(
+                    leg["rgba"]
+                ),
+            }
+        )
+
+    config_text = json.dumps(
+        config,
+        indent=2,
     )
 
-    script = f'''
-import bpy
+    assets_text = json.dumps(
+        assets,
+        indent=2,
+    )
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    #
+    # This is a normal raw triple-quoted string.
+    # It is NOT an f-string.
+    #
+    # __CONFIG_PLACEHOLDER__ and
+    # __ASSETS_PLACEHOLDER__ are replaced afterwards.
+    #
+    # This completely avoids the previous:
+    #
+    # SyntaxError: f-string: valid expression required
+    #
+    # --------------------------------------------------------
+
+    script = r'''
+import base64
 import json
 import math
 import os
-import mathutils
+
+import bpy
 
 
 # ============================================================
-# INPUTS
+# GENERATED INPUT
 # ============================================================
 
-IMAGE_PATH = {image_path!r}
-OUTPUT_PATH = {output_path!r}
-SCENE_JSON_PATH = {scene_json_path!r}
+CONFIG = __CONFIG_PLACEHOLDER__
 
-CONFIG = json.loads(
-    {config_json!r}
+ASSETS = __ASSETS_PLACEHOLDER__
+
+
+# ============================================================
+# OUTPUT DIRECTORY
+# ============================================================
+
+SCRIPT_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
+
+OUTPUT_DIR = os.path.join(
+    SCRIPT_DIR,
+    "blender_render"
+)
+
+os.makedirs(
+    OUTPUT_DIR,
+    exist_ok=True
 )
 
 
@@ -1336,70 +1780,167 @@ bpy.ops.object.delete(
     use_global=False
 )
 
+for datablocks in (
+    bpy.data.meshes,
+    bpy.data.curves,
+    bpy.data.materials,
+    bpy.data.cameras,
+    bpy.data.lights,
+):
+    for block in list(datablocks):
+        try:
+            if block.users == 0:
+                datablocks.remove(block)
+        except Exception:
+            pass
+
 
 # ============================================================
-# LOAD SCENE JSON
+# SCENE
 # ============================================================
 
-with open(
-    SCENE_JSON_PATH,
-    "r",
-    encoding="utf-8"
-) as f:
-    DATA = json.load(f)
+scene = bpy.context.scene
+
+scene.frame_start = 1
+
+scene.frame_end = int(
+    CONFIG["total_frames"]
+)
+
+scene.render.fps = int(
+    CONFIG["fps"]
+)
+
+resolution = int(
+    CONFIG["resolution"]
+)
+
+scene.render.resolution_x = resolution
+scene.render.resolution_y = resolution
+scene.render.resolution_percentage = 100
+
+scene.render.image_settings.file_format = "PNG"
+
+scene.render.film_transparent = False
+
+
+# ============================================================
+# RENDER ENGINE
+# ============================================================
+
+try:
+    scene.render.engine = "BLENDER_EEVEE_NEXT"
+except Exception:
+    try:
+        scene.render.engine = "BLENDER_EEVEE"
+    except Exception:
+        pass
 
 
 # ============================================================
 # WORLD
 # ============================================================
 
-world = bpy.context.scene.world
+world = scene.world
 
 if world is None:
-    world = bpy.data.worlds.new("World")
-    bpy.context.scene.world = world
+
+    world = bpy.data.worlds.new(
+        "AnimalWorld"
+    )
+
+    scene.world = world
 
 world.use_nodes = True
 
-bg = world.node_tree.nodes.get(
+background = world.node_tree.nodes.get(
     "Background"
 )
 
-if bg:
-    bg.inputs["Color"].default_value = (
+if background:
+
+    background.inputs["Color"].default_value = (
         1.0,
         1.0,
         1.0,
-        1.0
+        1.0,
     )
 
-    bg.inputs["Strength"].default_value = 0.8
+    background.inputs["Strength"].default_value = 0.7
 
 
 # ============================================================
-# IMAGE
+# IMAGE DECODING
 # ============================================================
 
-image = bpy.data.images.load(
-    IMAGE_PATH,
-    check_existing=True
+def write_asset(
+    name,
+    encoded,
+):
+
+    path = os.path.join(
+        OUTPUT_DIR,
+        name,
+    )
+
+    data = base64.b64decode(
+        encoded
+    )
+
+    with open(
+        path,
+        "wb",
+    ) as handle:
+
+        handle.write(data)
+
+    return path
+
+
+BODY_IMAGE_PATH = write_asset(
+    "body.png",
+    ASSETS["body"]["png_b64"],
 )
+
+
+LEG_IMAGE_PATHS = []
+
+for index, leg in enumerate(
+    ASSETS["legs"]
+):
+
+    path = write_asset(
+        "leg_%03d.png" % index,
+        leg["png_b64"],
+    )
+
+    LEG_IMAGE_PATHS.append(
+        path
+    )
 
 
 # ============================================================
 # MATERIAL
 # ============================================================
 
-def make_material():
+def make_image_material(
+    name,
+    image_path,
+):
 
-    mat = bpy.data.materials.new(
-        "Original_Drawing_Material"
+    image = bpy.data.images.load(
+        image_path,
+        check_existing=True,
     )
 
-    mat.use_nodes = True
+    material = bpy.data.materials.new(
+        name
+    )
 
-    nodes = mat.node_tree.nodes
-    links = mat.node_tree.links
+    material.use_nodes = True
+
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
 
     for node in list(nodes):
         nodes.remove(node)
@@ -1418,157 +1959,244 @@ def make_material():
 
     texture.image = image
 
-    shader.inputs["Roughness"].default_value = 0.8
-
     links.new(
         texture.outputs["Color"],
-        shader.inputs["Base Color"]
+        shader.inputs["Base Color"],
     )
 
-    links.new(
-        texture.outputs["Alpha"],
-        shader.inputs["Alpha"]
-    )
+    if "Alpha" in texture.outputs:
 
-    shader.inputs["Alpha"].default_value = 1.0
+        links.new(
+            texture.outputs["Alpha"],
+            shader.inputs["Alpha"],
+        )
+
+    shader.inputs["Roughness"].default_value = 0.78
 
     links.new(
         shader.outputs["BSDF"],
-        output.inputs["Surface"]
+        output.inputs["Surface"],
     )
 
-    mat.surface_render_method = 'DITHERED'
+    # Blender 4.x
+    try:
+        material.surface_render_method = "DITHERED"
+    except Exception:
+        pass
 
-    return mat
+    # Older Blender versions
+    try:
+        material.blend_method = "BLEND"
+    except Exception:
+        pass
 
+    try:
+        material.use_screen_refraction = True
+    except Exception:
+        pass
 
-MATERIAL = make_material()
-
-
-# ============================================================
-# NORMALIZED POINT → BLENDER
-# ============================================================
-
-def convert_point(p):
-
-    y = float(p[0])
-    x = float(p[1])
-
-    # x: 0..100 -> -5..5
-    # y: 0..100 -> 5..-5
-
-    bx = (
-        x / 100.0
-        - 0.5
-    ) * 10.0
-
-    by = (
-        0.5
-        - y / 100.0
-    ) * 10.0
-
-    return (
-        bx,
-        by
-    )
+    return material
 
 
-# ============================================================
-# POLYGON MESH
-# ============================================================
+BODY_MATERIAL = make_image_material(
+    "Original_Animal_Body",
+    BODY_IMAGE_PATH,
+)
 
-def make_polygon_object(
-    name,
-    polygon,
-    z_depth=0.0
+
+LEG_MATERIALS = []
+
+for index, path in enumerate(
+    LEG_IMAGE_PATHS
 ):
 
-    if not polygon:
-        return None
+    LEG_MATERIALS.append(
+        make_image_material(
+            "Original_Leg_%03d" % index,
+            path,
+        )
+    )
 
-    points = []
 
-    for p in polygon:
+# ============================================================
+# PIXEL → BLENDER SCALE
+# ============================================================
 
-        if (
-            isinstance(p, (list, tuple))
-            and len(p) >= 2
-        ):
+image_width = float(
+    CONFIG["image_width"]
+)
 
-            x, y = convert_point(p)
+image_height = float(
+    CONFIG["image_height"]
+)
 
-            points.append(
-                (
-                    x,
-                    y,
-                    0.0
-                )
-            )
+# 1000 pixels ≈ 10 Blender units.
+PIXEL_SCALE = 0.01
 
-    if len(points) < 3:
-        return None
+
+# ============================================================
+# ROOT / BOB CONTROLLERS
+# ============================================================
+
+root = bpy.data.objects.new(
+    "ANIMAL_ROOT",
+    None,
+)
+
+bpy.context.collection.objects.link(
+    root
+)
+
+bob_controller = bpy.data.objects.new(
+    "ANIMAL_BODY_BOB",
+    None,
+)
+
+bpy.context.collection.objects.link(
+    bob_controller
+)
+
+bob_controller.parent = root
+
+
+# ============================================================
+# MATERIAL PLANE CREATOR
+# ============================================================
+
+def create_sprite_plane(
+    name,
+    width_px,
+    height_px,
+    material,
+    origin_x_px,
+    origin_y_px,
+    world_x_px,
+    world_y_px,
+    z_value,
+):
+
+    width = (
+        float(width_px)
+        * PIXEL_SCALE
+    )
+
+    height = (
+        float(height_px)
+        * PIXEL_SCALE
+    )
+
+    ox = (
+        float(origin_x_px)
+        * PIXEL_SCALE
+    )
+
+    oy = (
+        float(origin_y_px)
+        * PIXEL_SCALE
+    )
+
+    # Image coordinates:
+    #
+    # top-left     = (0,0)
+    # top-right    = (width,0)
+    # bottom-right = (width,-height)
+    # bottom-left  = (0,-height)
+    #
+    # The object's origin can therefore be placed
+    # at an anatomical pivot.
+
+    vertices = [
+        (-ox, -oy, 0.0),
+        (width - ox, -oy, 0.0),
+        (width - ox, -height - oy, 0.0),
+        (-ox, -height - oy, 0.0),
+    ]
+
+    faces = [
+        (0, 3, 2, 1)
+    ]
 
     mesh = bpy.data.meshes.new(
         name + "_Mesh"
     )
 
-    verts = points
-
-    faces = [
-        tuple(
-            range(
-                len(verts)
-            )
-        )
-    ]
-
     mesh.from_pydata(
-        verts,
+        vertices,
         [],
-        faces
+        faces,
     )
 
     mesh.update()
 
     obj = bpy.data.objects.new(
         name,
-        mesh
+        mesh,
     )
 
     bpy.context.collection.objects.link(
         obj
     )
 
+    obj.location = (
+        float(world_x_px)
+        * PIXEL_SCALE,
+        -float(world_y_px)
+        * PIXEL_SCALE,
+        float(z_value),
+    )
+
     obj.data.materials.append(
-        MATERIAL
+        material
     )
 
-    # --------------------------------------------------------
-    # SOLIDIFY
-    # --------------------------------------------------------
-
-    solid = obj.modifiers.new(
-        "3D_Extrusion",
-        "SOLIDIFY"
+    # UV coordinates
+    uv_layer = (
+        mesh.uv_layers.new(
+            name="UVMap"
+        )
     )
 
-    solid.thickness = CONFIG[
-        "extrusion"
+    uv_values = [
+        (0.0, 0.0),
+        (1.0, 0.0),
+        (1.0, 1.0),
+        (0.0, 1.0),
     ]
 
+    for loop in mesh.loops:
+
+        uv_layer.data[
+            loop.index
+        ].uv = uv_values[
+            mesh.loops[
+                loop.index
+            ].vertex_index
+        ]
+
     # --------------------------------------------------------
-    # BEVEL
+    # 3D DEPTH
     # --------------------------------------------------------
 
-    bevel_amount = CONFIG[
-        "bevel"
-    ]
+    solidify = obj.modifiers.new(
+        "Shallow_3D_Depth",
+        "SOLIDIFY",
+    )
 
-    if bevel_amount > 0:
+    solidify.thickness = float(
+        CONFIG["extrusion"]
+    )
+
+    solidify.offset = 0.0
+
+    bevel_amount = float(
+        CONFIG["bevel"]
+    )
+
+    if bevel_amount > 0.0:
 
         bevel = obj.modifiers.new(
-            "Soft_3D_Edge",
-            "BEVEL"
+            "Soft_Edge",
+            "BEVEL",
         )
 
         bevel.width = bevel_amount
@@ -1578,108 +2206,130 @@ def make_polygon_object(
 
 
 # ============================================================
-# CREATE COMPLETE ANIMAL BODY
+# BODY
 # ============================================================
 
-animal_polygon = DATA.get(
-    "animal_polygon",
-    []
+body_bbox = ASSETS["body"]["bbox"]
+
+body_x1 = float(
+    body_bbox[0]
 )
 
-body = make_polygon_object(
+body_y1 = float(
+    body_bbox[1]
+)
+
+body_x2 = float(
+    body_bbox[2]
+)
+
+body_y2 = float(
+    body_bbox[3]
+)
+
+body_width = (
+    body_x2
+    - body_x1
+)
+
+body_height = (
+    body_y2
+    - body_y1
+)
+
+body = create_sprite_plane(
     "Animal_Body",
-    animal_polygon
+    body_width,
+    body_height,
+    BODY_MATERIAL,
+    0.0,
+    0.0,
+    body_x1,
+    body_y1,
+    0.00,
 )
 
-if body is None:
-
-    raise RuntimeError(
-        "Could not create complete animal mesh."
-    )
+body.parent = bob_controller
 
 
 # ============================================================
-# CREATE LEG OBJECTS
+# LEGS
 # ============================================================
 
 legs = []
 
-for index, part in enumerate(
-    DATA.get("parts", [])
+for index, leg_data in enumerate(
+    ASSETS["legs"]
 ):
 
-    if not isinstance(
-        part,
-        dict
-    ):
-        continue
+    bbox = leg_data["bbox"]
 
-    if str(
-        part.get(
-            "type",
-            ""
-        )
-    ).lower() != "leg":
+    x1 = float(bbox[0])
+    y1 = float(bbox[1])
+    x2 = float(bbox[2])
+    y2 = float(bbox[3])
 
-        continue
-
-    polygon = (
-        part.get(
-            "polygon",
-            []
-        )
-        or []
-    )
-
-    obj = make_polygon_object(
-        part.get(
-            "name",
-            f"Leg_{{index}}"
-        ),
-        polygon
-    )
-
-    if obj is None:
-        continue
+    width = x2 - x1
+    height = y2 - y1
 
     joints = (
-        part.get(
-            "joints",
-            {}
-        )
+        leg_data.get("joints")
         or {}
     )
 
-    proximal = joints.get(
-        "proximal"
+    proximal = (
+        joints.get("proximal")
+        or [
+            (x1 + x2) * 0.5,
+            y1,
+        ]
     )
 
-    if proximal:
+    proximal_x = float(
+        proximal[0]
+    )
 
-        px, py = convert_point(
-            proximal
-        )
+    proximal_y = float(
+        proximal[1]
+    )
 
-        # Put origin at proximal joint.
-        obj.location.x = px
-        obj.location.y = py
+    local_pivot_x = (
+        proximal_x - x1
+    )
 
-        # Move mesh opposite to origin.
-        for vertex in obj.data.vertices:
+    local_pivot_y = (
+        proximal_y - y1
+    )
 
-            vertex.co.x -= px
-            vertex.co.y -= py
+    material = LEG_MATERIALS[index]
+
+    leg = create_sprite_plane(
+        "Leg_%03d_%s" % (
+            index,
+            leg_data.get(
+                "name",
+                "leg",
+            ),
+        ),
+        width,
+        height,
+        material,
+        local_pivot_x,
+        local_pivot_y,
+        proximal_x,
+        proximal_y,
+        0.03 + index * 0.002,
+    )
+
+    leg.parent = bob_controller
 
     legs.append(
         {
-            "object": obj,
+            "object": leg,
             "side": str(
-                part.get(
+                leg_data.get(
                     "side",
-                    part.get(
-                        "name",
-                        ""
-                    )
+                    "",
                 )
             ).lower(),
         }
@@ -1687,24 +2337,26 @@ for index, part in enumerate(
 
 
 # ============================================================
-# LEG PHASE
+# WALK PHASE
 # ============================================================
 
-def leg_phase(
+def phase_for_leg(
     side,
-    index
+    index,
 ):
 
-    if "front_left" in side:
+    side = str(side).lower()
+
+    if (
+        "front_left" in side
+        or "back_right" in side
+    ):
         return 0.0
 
-    if "back_right" in side:
-        return 0.0
-
-    if "front_right" in side:
-        return math.pi
-
-    if "back_left" in side:
+    if (
+        "front_right" in side
+        or "back_left" in side
+    ):
         return math.pi
 
     return (
@@ -1715,231 +2367,506 @@ def leg_phase(
 
 
 # ============================================================
-# WALK ANIMATION
+# FRAME ALLOCATION
 # ============================================================
 
-scene = bpy.context.scene
+total_frames = int(
+    CONFIG["total_frames"]
+)
 
-scene.frame_start = 1
-scene.frame_end = CONFIG[
-    "total_frames"
-]
+mode = str(
+    CONFIG["animation_mode"]
+)
 
-scene.render.fps = CONFIG[
-    "fps"
-]
+if mode == "Walk in place only":
 
-scene.render.resolution_x = CONFIG[
-    "resolution"
-]
+    intro_n = 0
+    walk_n = 0
+    stand_n = total_frames
+    merge_n = 0
 
-scene.render.resolution_y = CONFIG[
-    "resolution"
-]
+else:
 
-scene.render.resolution_percentage = 100
-
-
-# ============================================================
-# BODY BOB
-# ============================================================
-
-body_start_z = body.location.z
-
-for frame in range(
-    1,
-    CONFIG["total_frames"] + 1
-):
-
-    t = (
-        frame - 1
-    ) / max(
-        1,
-        CONFIG["total_frames"] - 1
-    )
-
-    bob = math.sin(
-        t
-        * math.pi
-        * 2.0
-        * max(
-            1,
-            CONFIG["walk_cycles"]
+    walk_n = int(
+        round(
+            total_frames
+            * float(
+                CONFIG[
+                    "walk_in_fraction"
+                ]
+            )
         )
     )
 
-    body.location.z = (
-        body_start_z
-        + bob
-        * CONFIG["body_bob"]
-        * 10.0
+    stand_n = int(
+        round(
+            total_frames
+            * float(
+                CONFIG[
+                    "stand_fraction"
+                ]
+            )
+        )
     )
 
-    body.keyframe_insert(
+    if (
+        mode
+        == "White canvas → walk in → stand → merge"
+    ):
+
+        merge_n = int(
+            round(
+                total_frames
+                * float(
+                    CONFIG[
+                        "merge_fraction"
+                    ]
+                )
+            )
+        )
+
+    else:
+
+        merge_n = 0
+
+    intro_n = max(
+        0,
+        total_frames
+        - walk_n
+        - stand_n
+        - merge_n,
+    )
+
+
+# ============================================================
+# ENTRY POSITION
+# ============================================================
+
+character_width = body_width
+
+if (
+    CONFIG["entry_side"]
+    == "Left"
+):
+
+    start_x = -(
+        character_width
+        + image_width
+        * float(
+            CONFIG[
+                "entry_extra_distance"
+            ]
+        )
+    )
+
+else:
+
+    start_x = (
+        image_width
+        + image_width
+        * float(
+            CONFIG[
+                "entry_extra_distance"
+            ]
+        )
+        - body_x1
+    )
+
+
+# ============================================================
+# ANIMATION
+# ============================================================
+
+cycles = max(
+    1,
+    int(
+        CONFIG["walk_cycles"]
+    ),
+)
+
+step_angle = math.radians(
+    float(
+        CONFIG["step_angle"]
+    )
+)
+
+body_bob_amount = (
+    float(
+        CONFIG["body_bob"]
+    )
+    * image_height
+    * PIXEL_SCALE
+)
+
+
+def set_linear_interpolation(
+    obj,
+):
+
+    animation_data = (
+        obj.animation_data
+    )
+
+    if not animation_data:
+        return
+
+    action = animation_data.action
+
+    if not action:
+        return
+
+    for fcurve in action.fcurves:
+
+        for keyframe in fcurve.keyframe_points:
+
+            keyframe.interpolation = "LINEAR"
+
+
+# ------------------------------------------------------------
+# ROOT MOTION
+# ------------------------------------------------------------
+
+for frame in range(
+    1,
+    total_frames + 1,
+):
+
+    root_x = 0.0
+
+    if mode != "Walk in place only":
+
+        if frame <= intro_n:
+
+            root_x = start_x
+
+        elif (
+            frame
+            <= intro_n + walk_n
+        ):
+
+            if walk_n <= 1:
+
+                progress = 1.0
+
+            else:
+
+                progress = (
+                    frame
+                    - intro_n
+                    - 1
+                ) / float(
+                    walk_n - 1
+                )
+
+            # Smooth movement into final position.
+            smooth = (
+                progress
+                * progress
+                * (
+                    3.0
+                    - 2.0
+                    * progress
+                )
+            )
+
+            root_x = (
+                start_x
+                * (1.0 - smooth)
+            )
+
+        else:
+
+            root_x = 0.0
+
+    root.location.x = (
+        root_x
+        * PIXEL_SCALE
+    )
+
+    root.keyframe_insert(
         data_path="location",
-        index=2,
-        frame=frame
+        index=0,
+        frame=frame,
     )
 
 
-# ============================================================
-# LEG WALK
-# ============================================================
+set_linear_interpolation(
+    root
+)
+
+
+# ------------------------------------------------------------
+# BODY BOB
+# ------------------------------------------------------------
+
+for frame in range(
+    1,
+    total_frames + 1,
+):
+
+    if mode == "Walk in place only":
+
+        gait_progress = (
+            frame - 1
+        ) / float(
+            max(
+                1,
+                total_frames - 1,
+            )
+        )
+
+    elif frame <= intro_n:
+
+        gait_progress = 0.0
+
+    else:
+
+        gait_progress = (
+            frame - 1
+        ) / float(
+            max(
+                1,
+                total_frames - 1,
+            )
+        )
+
+    bob = math.sin(
+        gait_progress
+        * math.pi
+        * 2.0
+        * cycles
+    )
+
+    bob_controller.location.y = (
+        bob
+        * body_bob_amount
+    )
+
+    bob_controller.keyframe_insert(
+        data_path="location",
+        index=1,
+        frame=frame,
+    )
+
+
+set_linear_interpolation(
+    bob_controller
+)
+
+
+# ------------------------------------------------------------
+# LEG ROTATION
+# ------------------------------------------------------------
 
 for index, leg_data in enumerate(
     legs
 ):
 
-    obj = leg_data[
-        "object"
-    ]
+    obj = leg_data["object"]
 
-    side = leg_data[
-        "side"
-    ]
+    side = leg_data["side"]
 
-    phase = leg_phase(
+    phase = phase_for_leg(
         side,
-        index
+        index,
     )
-
-    base_rotation = obj.rotation_euler.z
 
     for frame in range(
         1,
-        CONFIG["total_frames"] + 1
+        total_frames + 1,
     ):
 
-        t = (
-            frame - 1
-        ) / max(
-            1,
-            CONFIG["total_frames"] - 1
-        )
+        if mode != "Walk in place only":
+
+            if frame <= intro_n:
+
+                gait_progress = 0.0
+
+            elif (
+                frame
+                <= intro_n + walk_n
+            ):
+
+                if walk_n <= 1:
+
+                    local_progress = 1.0
+
+                else:
+
+                    local_progress = (
+                        frame
+                        - intro_n
+                        - 1
+                    ) / float(
+                        walk_n - 1
+                    )
+
+                gait_progress = (
+                    local_progress
+                    * cycles
+                )
+
+            else:
+
+                after_walk = (
+                    frame
+                    - intro_n
+                    - walk_n
+                )
+
+                gait_progress = (
+                    after_walk
+                    / float(
+                        max(
+                            1,
+                            stand_n - 1,
+                        )
+                    )
+                    * cycles
+                )
+
+        else:
+
+            gait_progress = (
+                frame - 1
+            ) / float(
+                max(
+                    1,
+                    total_frames - 1,
+                )
+            ) * cycles
 
         gait = math.sin(
-            t
+            gait_progress
             * math.pi
             * 2.0
-            * max(
-                1,
-                CONFIG["walk_cycles"]
-            )
             + phase
         )
 
         angle = (
-            math.radians(
-                CONFIG["step_angle"]
-            )
+            step_angle
             * gait
         )
 
         if "back" in side:
+
             angle *= 0.90
 
-        obj.rotation_euler.z = (
-            base_rotation
-            + angle
-        )
+        obj.rotation_euler.z = angle
 
         obj.keyframe_insert(
             data_path="rotation_euler",
             index=2,
-            frame=frame
+            frame=frame,
         )
+
+    set_linear_interpolation(
+        obj
+    )
 
 
 # ============================================================
 # CAMERA
 # ============================================================
 
+camera_x = (
+    image_width
+    * PIXEL_SCALE
+    * 0.5
+)
+
+camera_y = -(
+    image_height
+    * PIXEL_SCALE
+    * 0.5
+)
+
 bpy.ops.object.camera_add(
     location=(
-        0.0,
-        0.0,
-        14.0
+        camera_x,
+        camera_y,
+        20.0,
     )
 )
 
 camera = bpy.context.object
 
+camera.name = "Animation_Camera"
+
 camera.data.type = "ORTHO"
 
-camera.data.ortho_scale = 11.5
-
-camera.rotation_euler = (
-    0.0,
-    0.0,
-    0.0
+camera.data.ortho_scale = (
+    max(
+        image_width,
+        image_height,
+    )
+    * PIXEL_SCALE
+    * 1.08
 )
 
-# Point camera downward toward XY plane.
 camera.rotation_euler = (
     0.0,
     0.0,
-    0.0
+    0.0,
 )
 
 scene.camera = camera
 
 
 # ============================================================
-# LIGHT
+# LIGHTING
 # ============================================================
 
 bpy.ops.object.light_add(
     type="AREA",
     location=(
-        0,
-        0,
-        8
-    )
+        camera_x,
+        camera_y,
+        10.0,
+    ),
 )
 
 light = bpy.context.object
 
-light.data.energy = 800
+light.name = "Soft_3D_Light"
+
+light.data.energy = 700
 
 light.data.shape = "DISK"
 
-light.data.size = 10
+light.data.size = 8.0
 
 
 # ============================================================
-# RENDER
+# SECOND SOFT LIGHT
 # ============================================================
 
-scene.render.image_settings.file_format = "PNG"
+bpy.ops.object.light_add(
+    type="AREA",
+    location=(
+        camera_x - 4.0,
+        camera_y + 3.0,
+        6.0,
+    ),
+)
 
-scene.render.film_transparent = False
+fill = bpy.context.object
 
-scene.render.filepath = OUTPUT_PATH
+fill.name = "Fill_Light"
 
-scene.render.engine = "BLENDER_EEVEE_NEXT"
+fill.data.energy = 250
 
-scene.render.resolution_x = CONFIG[
-    "resolution"
-]
-
-scene.render.resolution_y = CONFIG[
-    "resolution"
-]
-
-scene.render.resolution_percentage = 100
-
-scene.render.fps = CONFIG[
-    "fps"
-]
+fill.data.size = 6.0
 
 
 # ============================================================
 # SAVE BLEND
 # ============================================================
 
-blend_path = os.path.splitext(
-    OUTPUT_PATH
-)[0] + ".blend"
+blend_path = os.path.join(
+    OUTPUT_DIR,
+    "animal_animation.blend",
+)
 
 bpy.ops.wm.save_as_mainfile(
     filepath=blend_path
@@ -1947,38 +2874,55 @@ bpy.ops.wm.save_as_mainfile(
 
 
 # ============================================================
-# RENDER ANIMATION
+# RENDER
 # ============================================================
 
-scene.render.filepath = (
-    os.path.splitext(
-        OUTPUT_PATH
-    )[0]
-    + "_"
-    + "####"
-    + ".png"
+scene.render.filepath = os.path.join(
+    OUTPUT_DIR,
+    "frame_",
 )
+
+scene.render.image_settings.file_format = "PNG"
 
 bpy.ops.render.render(
     animation=True
 )
 
+
+# ============================================================
+# COMPLETE
+# ============================================================
+
 print(
     "BLENDER_ANIMATION_COMPLETE"
 )
+
+print(
+    "OUTPUT_DIRECTORY:",
+    OUTPUT_DIR
+)
 '''
+
+    script = script.replace(
+        "__CONFIG_PLACEHOLDER__",
+        config_text,
+    )
+
+    script = script.replace(
+        "__ASSETS_PLACEHOLDER__",
+        assets_text,
+    )
 
     return script
 
 
 # ============================================================
-# CREATE BLENDER PROJECT
+# RUN BLENDER
 # ============================================================
 
 def run_blender_animation(
-    image_pil: Image.Image,
-    scene: Dict[str, Any],
-) -> Optional[Dict[str, str]]:
+    prepared: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
 
     blender = find_blender(
         BLENDER_PATH
@@ -1991,8 +2935,9 @@ def run_blender_animation(
         )
 
         st.info(
-            "Install Blender and either add it to PATH "
-            "or enter the full blender.exe path in the sidebar."
+            "Install Blender separately and either add it "
+            "to PATH or enter the full blender.exe path "
+            "in the sidebar."
         )
 
         return None
@@ -2001,68 +2946,30 @@ def run_blender_animation(
         prefix="animal_blender_"
     )
 
-    image_path = os.path.join(
+    script_path = os.path.join(
         work_dir,
-        "original_animal.png",
+        "animal_blender_animation.py",
     )
 
-    scene_json_path = os.path.join(
-        work_dir,
-        "scene.json",
-    )
-
-    blender_script_path = os.path.join(
-        work_dir,
-        "animate.py",
-    )
-
-    output_path = os.path.join(
-        work_dir,
-        "animal_animation",
-    )
-
-    image_pil.save(
-        image_path,
-        format="PNG",
+    script = generate_blender_script(
+        prepared
     )
 
     with open(
-        scene_json_path,
+        script_path,
         "w",
         encoding="utf-8",
-    ) as f:
+    ) as handle:
 
-        json.dump(
-            scene,
-            f,
-            indent=2,
-        )
+        handle.write(script)
 
-    blender_script = generate_blender_script(
-        image_path,
-        output_path,
-        scene_json_path,
-    )
-
-    with open(
-        blender_script_path,
-        "w",
-        encoding="utf-8",
-    ) as f:
-
-        f.write(
-            blender_script
-        )
-
-    st.session_state.blender_script = (
-        blender_script
-    )
+    st.session_state.blender_script = script
 
     command = [
         blender,
         "--background",
         "--python",
-        blender_script_path,
+        script_path,
     ]
 
     try:
@@ -2072,12 +2979,13 @@ def run_blender_animation(
             capture_output=True,
             text=True,
             timeout=900,
+            cwd=work_dir,
         )
 
     except subprocess.TimeoutExpired:
 
         st.error(
-            "Blender rendering timed out."
+            "Blender rendering timed out after 15 minutes."
         )
 
         return None
@@ -2101,71 +3009,73 @@ def run_blender_animation(
         ):
 
             st.code(
-                result.stdout
+                (
+                    result.stdout
+                    or ""
+                )
                 + "\n"
-                + result.stderr
+                + (
+                    result.stderr
+                    or ""
+                )
             )
 
         return None
 
-    blend_path = (
-        output_path
-        + ".blend"
+    render_dir = os.path.join(
+        work_dir,
+        "blender_render",
     )
 
-    frame_pattern = (
-        output_path
-        + "_"
+    blend_path = os.path.join(
+        render_dir,
+        "animal_animation.blend",
     )
 
     return {
         "work_dir": work_dir,
+        "render_dir": render_dir,
         "blend_path": blend_path,
-        "frame_pattern": frame_pattern,
         "stdout": result.stdout,
+        "stderr": result.stderr,
     }
 
 
 # ============================================================
-# FRAMES → GIF
+# COLLECT BLENDER FRAMES
 # ============================================================
 
 def collect_blender_frames(
-    frame_pattern: str,
+    render_dir: str,
 ) -> List[np.ndarray]:
 
-    directory = os.path.dirname(
-        frame_pattern
-    )
+    if not os.path.isdir(
+        render_dir
+    ):
 
-    prefix = os.path.basename(
-        frame_pattern
-    )
+        return []
 
     files = []
 
-    if not os.path.exists(
-        directory
-    ):
-        return []
-
     for name in os.listdir(
-        directory
+        render_dir
     ):
 
         if not name.startswith(
-            prefix
+            "frame_"
         ):
+
             continue
 
         if not name.lower().endswith(
             ".png"
         ):
+
             continue
 
         files.append(
             os.path.join(
-                directory,
+                render_dir,
                 name,
             )
         )
@@ -2186,6 +3096,10 @@ def collect_blender_frames(
 
     return frames
 
+
+# ============================================================
+# GIF
+# ============================================================
 
 def gif_bytes(
     frames: List[np.ndarray],
@@ -2231,11 +3145,65 @@ def gif_bytes(
 
 
 # ============================================================
+# MP4
+# ============================================================
+
+def mp4_bytes(
+    frames: List[np.ndarray],
+    fps: int,
+) -> bytes:
+
+    if not frames:
+        return b""
+
+    height, width = frames[0].shape[:2]
+
+    temp_path = tempfile.mktemp(
+        suffix=".mp4"
+    )
+
+    writer = cv2.VideoWriter(
+        temp_path,
+        cv2.VideoWriter_fourcc(
+            *"mp4v"
+        ),
+        fps,
+        (width, height),
+    )
+
+    for frame in frames:
+
+        writer.write(frame)
+
+    writer.release()
+
+    try:
+
+        with open(
+            temp_path,
+            "rb",
+        ) as handle:
+
+            data = handle.read()
+
+    finally:
+
+        try:
+            os.remove(
+                temp_path
+            )
+        except Exception:
+            pass
+
+    return data
+
+
+# ============================================================
 # ZIP
 # ============================================================
 
-def zip_files(
-    files: List[str],
+def zip_png_frames(
+    render_dir: str,
 ) -> bytes:
 
     buffer = io.BytesIO()
@@ -2246,22 +3214,40 @@ def zip_files(
         zipfile.ZIP_DEFLATED,
     ) as archive:
 
-        for path in files:
+        if os.path.isdir(
+            render_dir
+        ):
 
-            if os.path.exists(path):
-
-                archive.write(
-                    path,
-                    os.path.basename(
-                        path
-                    ),
+            for name in sorted(
+                os.listdir(
+                    render_dir
                 )
+            ):
+
+                if (
+                    name.startswith(
+                        "frame_"
+                    )
+                    and name.endswith(
+                        ".png"
+                    )
+                ):
+
+                    path = os.path.join(
+                        render_dir,
+                        name,
+                    )
+
+                    archive.write(
+                        path,
+                        name,
+                    )
 
     return buffer.getvalue()
 
 
 # ============================================================
-# UI — UPLOAD
+# UPLOAD
 # ============================================================
 
 uploaded_file = st.file_uploader(
@@ -2328,7 +3314,7 @@ gemini_bytes = (
 
 
 # ============================================================
-# ORIGINAL
+# ORIGINAL + PIPELINE
 # ============================================================
 
 c1, c2 = st.columns(2)
@@ -2336,10 +3322,7 @@ c1, c2 = st.columns(2)
 with c1:
 
     st.image(
-        cv2.cvtColor(
-            image_bgr,
-            cv2.COLOR_BGR2RGB,
-        ),
+        image_pil,
         caption="Original drawing",
         width="stretch",
     )
@@ -2350,16 +3333,16 @@ with c2:
         """
 ### 🧠 Blender animation pipeline
 
-1. Gemini recognizes the COMPLETE animal.
+1. Gemini examines the COMPLETE animal.
 2. Tiny ears, paws, tail tips and other details are protected.
-3. Original pixels are preserved.
-4. Gemini identifies visible legs and anatomical pivots.
-5. Blender creates separate body and leg geometry.
-6. The drawing receives shallow 3D depth.
-7. Legs rotate around their proximal joints.
-8. Blender creates the walking animation.
-9. Blender renders the final frames.
-10. The result can be exported as a GIF/MP4.
+3. Gemini identifies every actually visible leg.
+4. Gemini gives Blender anatomical proximal pivots.
+5. Original pixels are extracted from the drawing.
+6. Body and legs become separate Blender sprites.
+7. Blender gives them shallow 3D depth.
+8. Legs rotate around their anatomical pivots.
+9. Blender renders the walking animation.
+10. GIF, MP4, PNG frames and `.blend` can be exported.
         """
     )
 
@@ -2375,7 +3358,7 @@ if st.button(
 ):
 
     with st.spinner(
-        "Analyzing complete animal anatomy..."
+        "Gemini is inspecting the COMPLETE animal and its small parts..."
     ):
 
         scene = analyze_scene(
@@ -2386,11 +3369,16 @@ if st.button(
     if scene:
 
         st.session_state.scene = scene
+
+        st.session_state.animal_prepared = None
+
         st.session_state.blender_result = None
+
+        st.session_state.blender_frames = None
 
 
 # ============================================================
-# STOP
+# STOP UNTIL ANALYSIS
 # ============================================================
 
 if not st.session_state.scene:
@@ -2402,12 +3390,17 @@ scene = st.session_state.scene
 
 
 # ============================================================
-# DETECTION
+# DETECTION RESULT
 # ============================================================
 
 st.success(
-    f"Detected: "
-    f"**{scene.get('identified_character', 'character')}**"
+    "Detected: "
+    + str(
+        scene.get(
+            "identified_character",
+            "character",
+        )
+    )
 )
 
 with st.expander(
@@ -2416,6 +3409,10 @@ with st.expander(
 
     st.json(scene)
 
+
+# ============================================================
+# OVERLAY
+# ============================================================
 
 overlay = detection_overlay(
     image_bgr,
@@ -2437,13 +3434,13 @@ st.image(
 
 
 # ============================================================
-# COMPLETE ANIMAL CHECK
+# COMPLETE ANIMAL AUDIT
 # ============================================================
 
 check = (
     scene.get(
         "complete_animal_check",
-        {}
+        {},
     )
     or {}
 )
@@ -2453,35 +3450,35 @@ checks = [
         "Head",
         check.get(
             "head_included",
-            False
+            False,
         ),
     ),
     (
         "Ears",
         check.get(
             "ears_included",
-            False
+            False,
         ),
     ),
     (
         "Tail",
         check.get(
             "tail_included",
-            False
+            False,
         ),
     ),
     (
         "Visible legs",
         check.get(
             "all_visible_legs_included",
-            False
+            False,
         ),
     ),
     (
         "Small parts",
         check.get(
             "small_visible_parts_included",
-            False
+            False,
         ),
     ),
 ]
@@ -2498,12 +3495,124 @@ for col, (label, value) in zip(
     with col:
 
         if value:
+
             st.success(
                 f"✓ {label}"
             )
+
         else:
+
             st.warning(
                 f"⚠ {label}"
+            )
+
+
+# ============================================================
+# PREPARE ARTWORK
+# ============================================================
+
+st.markdown("---")
+
+st.header(
+    "🧩 Step 2 — Prepare original artwork for Blender"
+)
+
+if st.button(
+    "🛠️ Prepare body + visible limbs",
+    width="stretch",
+):
+
+    with st.spinner(
+        "Separating the original pixels for Blender..."
+    ):
+
+        prepared = (
+            prepare_animal_for_blender(
+                image_bgr,
+                scene,
+            )
+        )
+
+    if prepared is None:
+
+        st.error(
+            "Could not prepare the animal for Blender."
+        )
+
+    else:
+
+        st.session_state.animal_prepared = (
+            prepared
+        )
+
+        st.session_state.blender_result = None
+
+        st.success(
+            "✅ Body and visible limbs prepared."
+        )
+
+
+prepared = (
+    st.session_state.animal_prepared
+)
+
+
+# ============================================================
+# SHOW PREPARED DATA
+# ============================================================
+
+if prepared:
+
+    st.success(
+        f"Prepared {len(prepared['legs'])} visible leg(s) "
+        "for Blender."
+    )
+
+    preview_cols = st.columns(
+        min(
+            5,
+            max(
+                1,
+                len(prepared["legs"]) + 1,
+            ),
+        )
+    )
+
+    body_rgba = prepared["body"]["rgba"]
+
+    body_rgb = cv2.cvtColor(
+        body_rgba,
+        cv2.COLOR_RGBA2BGRA,
+    )
+
+    with preview_cols[0]:
+
+        st.image(
+            cv2.cvtColor(
+                body_rgb,
+                cv2.COLOR_BGRA2RGBA,
+            ),
+            caption="Body",
+            width="stretch",
+        )
+
+    for index, leg in enumerate(
+        prepared["legs"]
+    ):
+
+        column_index = min(
+            index + 1,
+            len(preview_cols) - 1,
+        )
+
+        with preview_cols[column_index]:
+
+            rgba = leg["rgba"]
+
+            st.image(
+                rgba,
+                caption=leg["name"],
+                width="stretch",
             )
 
 
@@ -2514,7 +3623,7 @@ for col, (label, value) in zip(
 st.markdown("---")
 
 st.header(
-    "🧊 Step 2 — Blender 3D animation"
+    "🎬 Step 3 — Create Blender 3D animation"
 )
 
 blender_path_found = find_blender(
@@ -2524,25 +3633,24 @@ blender_path_found = find_blender(
 if blender_path_found:
 
     st.success(
-        f"Blender found: `{blender_path_found}`"
+        "Blender found: "
+        f"`{blender_path_found}`"
     )
 
 else:
 
     st.warning(
-        "Blender was not found on this computer."
+        "Blender was not found."
+    )
+
+    st.info(
+        "The app can still generate the Blender Python "
+        "script. Install Blender Desktop to render it."
     )
 
 
-st.write(
-    "The original drawing remains the source artwork. "
-    "Blender adds shallow depth and handles the actual "
-    "animation and rendering."
-)
-
-
 # ============================================================
-# GENERATE BLENDER
+# CREATE BLENDER ANIMATION
 # ============================================================
 
 if st.button(
@@ -2551,22 +3659,28 @@ if st.button(
     width="stretch",
 ):
 
-    if not blender_path_found:
+    if prepared is None:
 
         st.error(
-            "Please install Blender or provide the "
-            "Blender executable path."
+            "First click "
+            "**Prepare body + visible limbs**."
+        )
+
+    elif blender_path_found is None:
+
+        st.error(
+            "Blender is not installed or its executable "
+            "path is not available."
         )
 
     else:
 
         with st.spinner(
-            "Blender is creating the 3D animal and rendering..."
+            "Blender is building the 3D character and rendering..."
         ):
 
             result = run_blender_animation(
-                image_pil,
-                scene,
+                prepared
             )
 
         if result:
@@ -2575,125 +3689,140 @@ if st.button(
                 result
             )
 
+            frames = collect_blender_frames(
+                result["render_dir"]
+            )
+
+            st.session_state.blender_frames = (
+                frames
+            )
+
             st.success(
-                "✅ Blender animation completed."
+                f"✅ Blender finished — {len(frames)} frames rendered."
             )
 
 
 # ============================================================
-# BLENDER RESULT
+# RESULT
 # ============================================================
 
-result = st.session_state.blender_result
+result = (
+    st.session_state.blender_result
+)
 
-if result:
+frames = (
+    st.session_state.blender_frames
+)
 
-    frame_pattern = result[
-        "frame_pattern"
-    ]
+if result and frames:
 
-    frames = collect_blender_frames(
-        frame_pattern
+    st.markdown("---")
+
+    st.header(
+        "🎥 Blender result"
     )
 
-    if frames:
+    st.success(
+        f"Rendered {len(frames)} Blender frames."
+    )
 
-        st.header(
-            "🎬 Blender result"
-        )
+    gif_data = gif_bytes(
+        frames,
+        FPS,
+    )
 
-        st.success(
-            f"Rendered {len(frames)} Blender frames."
-        )
+    st.image(
+        gif_data,
+        caption="Blender-rendered animation",
+        width="stretch",
+    )
 
-        gif_data = gif_bytes(
-            frames,
-            FPS,
-        )
+    st.download_button(
+        "⬇️ Download Blender GIF",
+        gif_data,
+        "blender_animal_animation.gif",
+        "image/gif",
+        width="stretch",
+    )
 
-        st.image(
-            gif_data,
-            caption="Blender-rendered animation",
-            width="stretch",
-        )
+    mp4_data = mp4_bytes(
+        frames,
+        FPS,
+    )
+
+    if mp4_data:
 
         st.download_button(
-            "⬇️ Download Blender GIF",
-            gif_data,
-            "blender_animal_animation.gif",
-            "image/gif",
+            "⬇️ Download MP4",
+            mp4_data,
+            "blender_animal_animation.mp4",
+            "video/mp4",
             width="stretch",
         )
 
-        png_files = []
+    png_zip = zip_png_frames(
+        result["render_dir"]
+    )
 
-        directory = os.path.dirname(
-            frame_pattern
+    st.download_button(
+        "⬇️ Download PNG frames",
+        png_zip,
+        "blender_animation_frames.zip",
+        "application/zip",
+        width="stretch",
+    )
+
+    blend_path = result[
+        "blend_path"
+    ]
+
+    if os.path.exists(
+        blend_path
+    ):
+
+        with open(
+            blend_path,
+            "rb",
+        ) as handle:
+
+            blend_data = handle.read()
+
+        st.download_button(
+            "⬇️ Download Blender project (.blend)",
+            blend_data,
+            "animal_animation.blend",
+            "application/octet-stream",
+            width="stretch",
         )
 
-        prefix = os.path.basename(
-            frame_pattern
-        )
+    with st.expander(
+        "Blender console output"
+    ):
 
-        for name in sorted(
-            os.listdir(directory)
-        ):
-
-            if (
-                name.startswith(prefix)
-                and name.endswith(".png")
-            ):
-
-                png_files.append(
-                    os.path.join(
-                        directory,
-                        name,
-                    )
+        st.code(
+            (
+                result.get(
+                    "stdout",
+                    "",
                 )
-
-        if png_files:
-
-            zip_data = zip_files(
-                png_files
+                or ""
             )
-
-            st.download_button(
-                "⬇️ Download Blender PNG frames",
-                zip_data,
-                "blender_animation_frames.zip",
-                "application/zip",
-                width="stretch",
+            + "\n"
+            + (
+                result.get(
+                    "stderr",
+                    "",
+                )
+                or ""
             )
-
-        blend_path = result[
-            "blend_path"
-        ]
-
-        if os.path.exists(
-            blend_path
-        ):
-
-            with open(
-                blend_path,
-                "rb"
-            ) as f:
-
-                blend_data = f.read()
-
-            st.download_button(
-                "⬇️ Download Blender project",
-                blend_data,
-                "animal_animation.blend",
-                "application/octet-stream",
-                width="stretch",
-            )
-
-    else:
-
-        st.warning(
-            "Blender completed, but no rendered frames "
-            "were found."
         )
+
+
+elif result:
+
+    st.warning(
+        "Blender completed, but no PNG frames were found."
+    )
 
 
 # ============================================================
@@ -2708,11 +3837,17 @@ if st.session_state.blender_script:
         "🧩 Generated Blender Python script"
     )
 
+    st.caption(
+        "This script is self-contained: the prepared body and "
+        "limb artwork are embedded inside it. You can run it "
+        "directly with Blender Desktop."
+    )
+
     st.download_button(
         "⬇️ Download Blender Python script",
         st.session_state.blender_script,
         "animal_blender_animation.py",
-        "text/plain",
+        "text/x-python",
         width="stretch",
     )
 
@@ -2724,7 +3859,7 @@ if st.session_state.blender_script:
 st.markdown("---")
 
 st.caption(
-    "🦒 Blender 3D — Gemini complete-animal recognition, "
-    "original drawing preservation, shallow 3D extrusion, "
-    "anatomical leg pivots and Blender-based animation."
+    "🦒 Blender 2.5D — Gemini complete-animal recognition, "
+    "original-pixel preservation, separate visible limbs, "
+    "anatomical pivots, shallow 3D depth and Blender animation."
 )
