@@ -1,13 +1,7 @@
 import base64
 import io
 import json
-import math
 import os
-import shutil
-import subprocess
-import tempfile
-import zipfile
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
@@ -31,8 +25,8 @@ st.set_page_config(
 st.title("🦒 Hand-Drawn Animal Walk Animator — Blender 3D")
 
 st.caption(
-    "Gemini identifies the complete animal structure, calculates joint pivots, "
-    "and writes a standalone Blender Python automation script."
+    "Gemini analyzes your hand-drawn animal, segments the artwork, "
+    "and generates a self-contained Python script to animate and render it inside Blender."
 )
 
 
@@ -42,18 +36,13 @@ st.caption(
 
 st.sidebar.header("⚙️ Animation Settings")
 
+# Securely fetch API key from Streamlit Secrets or user input
+DEFAULT_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+
 GEMINI_API_KEY = st.sidebar.text_input(
     "Gemini API Key",
+    value=DEFAULT_API_KEY,
     type="password",
-)
-
-BLENDER_PATH = st.sidebar.text_input(
-    "Blender executable path",
-    value="",
-    help=(
-        "Leave empty to automatically search for Blender. "
-        "Example: C:\\Program Files\\Blender Foundation\\Blender 4.5\\blender.exe"
-    ),
 )
 
 ANIMATION_MODE = st.sidebar.selectbox(
@@ -185,8 +174,6 @@ DEFAULT_STATE = {
     "scene": None,
     "animal_prepared": None,
     "blender_script": None,
-    "blender_result": None,
-    "blender_frames": None,
 }
 
 for key, value in DEFAULT_STATE.items():
@@ -545,7 +532,7 @@ Identify every visible leg and joint pivot point accurately.
 
 
 # ============================================================
-# GEOMETRY
+# GEOMETRY HELPERS
 # ============================================================
 
 def pt_px(
@@ -775,10 +762,6 @@ def ink_mask(
     return foreground
 
 
-# ============================================================
-# COMPLETE ANIMAL PIXEL MASK
-# ============================================================
-
 def complete_animal_mask(
     image_bgr: np.ndarray,
     scene: Dict[str, Any],
@@ -843,10 +826,6 @@ def complete_animal_mask(
     return result
 
 
-# ============================================================
-# LEG DISCOVERY
-# ============================================================
-
 def leg_parts(
     scene: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
@@ -884,10 +863,6 @@ def leg_parts(
 
     return result
 
-
-# ============================================================
-# PREPARE LEG SPRITES
-# ============================================================
 
 def prepare_leg_sprite(
     image_bgr: np.ndarray,
@@ -1000,10 +975,6 @@ def prepare_leg_sprite(
         "rgba": rgba,
     }
 
-
-# ============================================================
-# BODY SPRITE
-# ============================================================
 
 def prepare_body_sprite(
     image_bgr: np.ndarray,
@@ -1134,10 +1105,6 @@ def prepare_body_sprite(
     }
 
 
-# ============================================================
-# DETECTION OVERLAY
-# ============================================================
-
 def detection_overlay(
     image: np.ndarray,
     scene: Dict[str, Any],
@@ -1239,10 +1206,6 @@ def detection_overlay(
     return overlay
 
 
-# ============================================================
-# PREPARE COMPLETE BLENDER DATA
-# ============================================================
-
 def prepare_animal_for_blender(
     image_bgr: np.ndarray,
     scene: Dict[str, Any],
@@ -1285,10 +1248,6 @@ def prepare_animal_for_blender(
     }
 
 
-# ============================================================
-# PNG / BASE64 HELPERS
-# ============================================================
-
 def rgba_to_base64(
     rgba: np.ndarray,
 ) -> str:
@@ -1306,88 +1265,6 @@ def rgba_to_base64(
     return base64.b64encode(
         encoded.tobytes()
     ).decode("ascii")
-
-
-# ============================================================
-# BLENDER DISCOVERY
-# ============================================================
-
-def find_blender(
-    configured_path: str,
-) -> Optional[str]:
-
-    configured_path = (
-        configured_path or ""
-    ).strip()
-
-    if configured_path:
-
-        p = Path(
-            configured_path
-        )
-
-        if p.exists() and p.is_file():
-            return str(p)
-
-    found = shutil.which(
-        "blender"
-    )
-
-    if found:
-        return found
-
-    windows_roots = [
-        r"C:\Program Files\Blender Foundation",
-        r"C:\Program Files",
-    ]
-
-    for root in windows_roots:
-
-        root_path = Path(root)
-
-        if not root_path.exists():
-            continue
-
-        try:
-
-            candidates = list(
-                root_path.glob(
-                    "Blender*/blender.exe"
-                )
-            )
-
-            candidates.sort(
-                reverse=True
-            )
-
-            if candidates:
-                return str(
-                    candidates[0]
-                )
-
-        except Exception:
-            pass
-
-    mac_candidates = [
-        "/Applications/Blender.app/Contents/MacOS/Blender",
-    ]
-
-    for candidate in mac_candidates:
-
-        if os.path.exists(candidate):
-            return candidate
-
-    linux_candidates = [
-        "/usr/bin/blender",
-        "/snap/bin/blender",
-    ]
-
-    for candidate in linux_candidates:
-
-        if os.path.exists(candidate):
-            return candidate
-
-    return None
 
 
 # ============================================================
@@ -2574,7 +2451,7 @@ fill.data.size = 6.0
 
 
 # ============================================================
-# SAVE BLEND AND RENDER (SELF-CONTAINED)
+# SAVE BLEND AND RENDER (SELF-CONTAINED EXECUTION)
 # ============================================================
 
 blend_path = os.path.join(
@@ -2612,328 +2489,6 @@ print("OUTPUT_DIRECTORY:", OUTPUT_DIR)
     )
 
     return script
-
-
-# ============================================================
-# RUN BLENDER
-# ============================================================
-
-def run_blender_animation(
-    prepared: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
-
-    blender = find_blender(
-        BLENDER_PATH
-    )
-
-    if blender is None:
-
-        st.error(
-            "Blender executable was not found."
-        )
-
-        st.info(
-            "Install Blender separately and either add it "
-            "to PATH or enter the full blender.exe path "
-            "in the sidebar."
-        )
-
-        return None
-
-    work_dir = tempfile.mkdtemp(
-        prefix="animal_blender_"
-    )
-
-    script_path = os.path.join(
-        work_dir,
-        "animal_blender_animation.py",
-    )
-
-    script = generate_blender_script(
-        prepared
-    )
-
-    with open(
-        script_path,
-        "w",
-        encoding="utf-8",
-    ) as handle:
-
-        handle.write(script)
-
-    st.session_state.blender_script = script
-
-    command = [
-        blender,
-        "--background",
-        "--python",
-        script_path,
-    ]
-
-    try:
-
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=900,
-            cwd=work_dir,
-        )
-
-    except subprocess.TimeoutExpired:
-
-        st.error(
-            "Blender rendering timed out after 15 minutes."
-        )
-
-        return None
-
-    except Exception as exc:
-
-        st.error(
-            f"Could not start Blender: {exc}"
-        )
-
-        return None
-
-    if result.returncode != 0:
-
-        st.error(
-            "Blender returned an error."
-        )
-
-        with st.expander(
-            "Blender console output"
-        ):
-
-            st.code(
-                (
-                    result.stdout
-                    or ""
-                )
-                + "\n"
-                + (
-                    result.stderr
-                    or ""
-                )
-            )
-
-        return None
-
-    render_dir = os.path.join(
-        work_dir,
-        "blender_render",
-    )
-
-    blend_path = os.path.join(
-        render_dir,
-        "animal_animation.blend",
-    )
-
-    return {
-        "work_dir": work_dir,
-        "render_dir": render_dir,
-        "blend_path": blend_path,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-    }
-
-
-# ============================================================
-# COLLECT BLENDER FRAMES
-# ============================================================
-
-def collect_blender_frames(
-    render_dir: str,
-) -> List[np.ndarray]:
-
-    if not os.path.isdir(
-        render_dir
-    ):
-
-        return []
-
-    files = []
-
-    for name in os.listdir(
-        render_dir
-    ):
-
-        if not name.startswith(
-            "frame_"
-        ):
-
-            continue
-
-        if not name.lower().endswith(
-            ".png"
-        ):
-
-            continue
-
-        files.append(
-            os.path.join(
-                render_dir,
-                name,
-            )
-        )
-
-    files.sort()
-
-    frames = []
-
-    for path in files:
-
-        img = cv2.imread(
-            path,
-            cv2.IMREAD_COLOR,
-        )
-
-        if img is not None:
-            frames.append(img)
-
-    return frames
-
-
-# ============================================================
-# GIF / MP4 / ZIP
-# ============================================================
-
-def gif_bytes(
-    frames: List[np.ndarray],
-    fps: int,
-) -> bytes:
-
-    if not frames:
-        return b""
-
-    pil_frames = []
-
-    for frame in frames:
-
-        rgb = cv2.cvtColor(
-            frame,
-            cv2.COLOR_BGR2RGB,
-        )
-
-        pil_frames.append(
-            Image.fromarray(rgb)
-        )
-
-    buffer = io.BytesIO()
-
-    duration = int(
-        1000
-        / max(
-            1,
-            fps,
-        )
-    )
-
-    pil_frames[0].save(
-        buffer,
-        format="GIF",
-        save_all=True,
-        append_images=pil_frames[1:],
-        duration=duration,
-        loop=0,
-    )
-
-    return buffer.getvalue()
-
-
-def mp4_bytes(
-    frames: List[np.ndarray],
-    fps: int,
-) -> bytes:
-
-    if not frames:
-        return b""
-
-    height, width = frames[0].shape[:2]
-
-    temp_path = tempfile.mktemp(
-        suffix=".mp4"
-    )
-
-    writer = cv2.VideoWriter(
-        temp_path,
-        cv2.VideoWriter_fourcc(
-            *"mp4v"
-        ),
-        fps,
-        (width, height),
-    )
-
-    for frame in frames:
-
-        writer.write(frame)
-
-    writer.release()
-
-    try:
-
-        with open(
-            temp_path,
-            "rb",
-        ) as handle:
-
-            data = handle.read()
-
-    finally:
-
-        try:
-            os.remove(
-                temp_path
-            )
-        except Exception:
-            pass
-
-    return data
-
-
-def zip_png_frames(
-    render_dir: str,
-) -> bytes:
-
-    buffer = io.BytesIO()
-
-    with zipfile.ZipFile(
-        buffer,
-        "w",
-        zipfile.ZIP_DEFLATED,
-    ) as archive:
-
-        if os.path.isdir(
-            render_dir
-        ):
-
-            for name in sorted(
-                os.listdir(
-                    render_dir
-                )
-            ):
-
-                if (
-                    name.startswith(
-                        "frame_"
-                    )
-                    and name.endswith(
-                        ".png"
-                    )
-                ):
-
-                    path = os.path.join(
-                        render_dir,
-                        name,
-                    )
-
-                    archive.write(
-                        path,
-                        name,
-                    )
-
-    return buffer.getvalue()
 
 
 # ============================================================
@@ -2982,12 +2537,12 @@ with c1:
 with c2:
     st.markdown(
         """
-### 🧠 Blender Automation Pipeline
+### ☁️ Cloud Workflow
 
-1. Gemini calculates the full creature boundaries and joint hierarchies.
-2. OpenCV segments the raw sprite cuts.
-3. A robust Python script bundles assets + geometry config.
-4. Blender processes the script automatically to animate and render frames locally.
+1. Upload your hand-drawn image here on **Streamlit Cloud**.
+2. **Gemini** calculates creature boundaries and extracts anatomical pivots.
+3. Click **Prepare and Generate Script** to package everything.
+4. Download the `.py` script and run it inside Blender on your local desktop to render your animation.
         """
     )
 
@@ -2996,7 +2551,7 @@ if st.button(
     type="primary",
     width="stretch",
 ):
-    with st.spinner("Gemini is calculating structural geometry and joint pivots..."):
+    with st.spinner("Gemini is analyzing structural geometry and joint pivots..."):
         scene = analyze_scene(
             gemini_bytes,
             GEMINI_API_KEY,
@@ -3005,8 +2560,7 @@ if st.button(
     if scene:
         st.session_state.scene = scene
         st.session_state.animal_prepared = None
-        st.session_state.blender_result = None
-        st.session_state.blender_frames = None
+        st.session_state.blender_script = None
 
 if not st.session_state.scene:
     st.stop()
@@ -3026,94 +2580,35 @@ st.image(
 )
 
 st.markdown("---")
-st.header("🧩 Step 2 — Prepare original artwork for Blender")
+st.header("🧩 Step 2 — Prepare Artwork & Generate Script")
 
-if st.button("🛠️ Prepare body + visible limbs", width="stretch"):
-    with st.spinner("Extracting layers..."):
+if st.button("🛠️ Build Self-Contained Blender Script", type="primary", width="stretch"):
+    with st.spinner("Extracting layer sprites and building script..."):
         prepared = prepare_animal_for_blender(image_bgr, scene)
 
     if prepared is None:
         st.error("Could not prepare the animal layers.")
     else:
         st.session_state.animal_prepared = prepared
-        st.session_state.blender_result = None
-        st.success("✅ Layers ready for script compiler.")
+        script_code = generate_blender_script(prepared)
+        st.session_state.blender_script = script_code
+        st.success("✅ Blender Python script generated successfully!")
 
 prepared = st.session_state.animal_prepared
 
 if prepared:
-    st.success(f"Prepared {len(prepared['legs'])} leg layers.")
-
-st.markdown("---")
-st.header("🎬 Step 3 — Create Blender Animation Script")
-
-blender_path_found = find_blender(BLENDER_PATH)
-
-if blender_path_found:
-    st.success(f"Blender found: `{blender_path_found}`")
-else:
-    st.warning("Blender executable not found automatically.")
-
-if st.button("🚀 Create Blender animation", type="primary", width="stretch"):
-    if prepared is None:
-        st.error("First click **Prepare body + visible limbs**.")
-    elif blender_path_found is None:
-        st.error("Provide a valid Blender executable path in the sidebar.")
-    else:
-        with st.spinner("Blender is executing the automation script..."):
-            result = run_blender_animation(prepared)
-
-        if result:
-            st.session_state.blender_result = result
-            frames = collect_blender_frames(result["render_dir"])
-            st.session_state.blender_frames = frames
-            st.success(f"✅ Render finished — {len(frames)} frames generated.")
-
-result = st.session_state.blender_result
-frames = st.session_state.blender_frames
-
-if result and frames:
-    st.markdown("---")
-    st.header("🎥 Render Output")
-
-    gif_data = gif_bytes(frames, FPS)
-    st.image(gif_data, caption="Animation Preview", width="stretch")
-
-    st.download_button(
-        "⬇️ Download GIF",
-        gif_data,
-        "animation.gif",
-        "image/gif",
-        width="stretch",
-    )
-
-    mp4_data = mp4_bytes(frames, FPS)
-    if mp4_data:
-        st.download_button(
-            "⬇️ Download MP4",
-            mp4_data,
-            "animation.mp4",
-            "video/mp4",
-            width="stretch",
-        )
-
-    blend_path = result["blend_path"]
-    if os.path.exists(blend_path):
-        with open(blend_path, "rb") as handle:
-            blend_data = handle.read()
-        st.download_button(
-            "⬇️ Download .blend Project",
-            blend_data,
-            "animal_animation.blend",
-            "application/octet-stream",
-            width="stretch",
-        )
+    st.success(f"Successfully processed body and {len(prepared['legs'])} leg layers.")
 
 if st.session_state.blender_script:
     st.markdown("---")
-    st.subheader("🧩 Generated Standalone Blender Python Script")
+    st.subheader("🎬 Step 3 — Download & Run in Blender")
+    st.info(
+        "Since this app is hosted in the cloud, download the script below, "
+        "open Blender locally, go to the **Scripting** tab, open the script, and press **Play**."
+    )
+
     st.download_button(
-        "⬇️ Download Python Script",
+        "⬇️ Download Blender Python Script (`animal_blender_animation.py`)",
         st.session_state.blender_script,
         "animal_blender_animation.py",
         "text/x-python",
