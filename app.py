@@ -2107,11 +2107,22 @@ def set_linear_interpolation(
     if not action:
         return
 
-    for fcurve in action.fcurves:
-
-        for keyframe in fcurve.keyframe_points:
-
-            keyframe.interpolation = "LINEAR"
+    # Blender 4.x and older compatibility
+    if hasattr(action, "fcurves"):
+        for fcurve in action.fcurves:
+            for keyframe in fcurve.keyframe_points:
+                keyframe.interpolation = "LINEAR"
+    else:
+        # Blender 5.x+ slotted channelbag compatibility
+        try:
+            from bpy_extras import anim_utils
+            channelbag = anim_utils.action_get_channelbag_for_slot(animation_data.action, animation_data.action_slot)
+            if channelbag and hasattr(channelbag, "fcurves"):
+                for fcurve in channelbag.fcurves:
+                    for keyframe in fcurve.keyframe_points:
+                        keyframe.interpolation = "LINEAR"
+        except Exception:
+            pass
 
 
 # ------------------------------------------------------------
