@@ -31,10 +31,8 @@ st.set_page_config(
 st.title("🦒 Hand-Drawn Animal Walk Animator — Blender 3D")
 
 st.caption(
-    "Gemini identifies the COMPLETE visible animal and its anatomy. "
-    "The original drawing is separated into body and visible limbs, "
-    "then Blender creates a 2.5D animated character while preserving "
-    "the original artwork."
+    "Gemini identifies the complete animal structure, calculates joint pivots, "
+    "and writes a standalone Blender Python automation script."
 )
 
 
@@ -429,149 +427,16 @@ def analyze_scene(
     discovered.sort(key=model_score)
 
     prompt = r"""
-You are analyzing a SINGLE hand-drawn animal scene.
+You are analyzing a SINGLE hand-drawn animal scene for programmatic 3D extraction and rigging.
 
-The animal will later be imported into Blender and animated.
+Analyze the image and compute all structural data in normalized coordinates (0..100, using [y, x]).
 
-The goal is NOT to redraw the animal.
-
-The goal is to provide highly accurate geometry so the ORIGINAL
-drawing can be separated into a complete animal and individual
-visible limbs.
-
-============================================================
-HIGHEST PRIORITY — COMPLETE ANIMAL RECOGNITION
-============================================================
-
-Determine the COMPLETE visible animal from the ORIGINAL IMAGE.
-
-The complete-animal boundary MUST include EVERY visible component
-belonging to the animal.
-
-Include, when visible:
-
-- entire body
-- head
-- neck
-- muzzle/nose
-- every visible ear
-- tiny ear tips
-- every visible leg
-- every visible foot/paw/hoof
-- tail
-- tail tip
-- horns
-- antlers
-- wings
-- eyes
-- facial features
-- whiskers
-- claws
-- toes
-- thin appendages
-- other visible anatomy
-
-DO NOT omit small parts.
-
-DO NOT reconstruct invisible anatomy.
-
-DO NOT invent hidden limbs.
-
-============================================================
-BLENDER REQUIREMENT
-============================================================
-
-The animal will become a 2.5D Blender character.
-
-Therefore:
-
-1. The complete animal polygon must contain EVERY visible
-   animal component.
-
-2. Every visible leg must be identified separately.
-
-3. Every visible leg must have:
-
-   proximal
-   middle
-   distal
-
-4. The proximal point must be the best anatomical rotation
-   point for Blender.
-
-5. Leg polygons must tightly cover the original visible
-   leg artwork.
-
-6. Do not invent legs hidden behind the body.
-
-7. Small ears, tail tips, paws, horns and other details do
-   not need animation joints, but MUST remain inside the
-   complete animal boundary.
-
-8. Original pixels will be used as textures.
-
-9. Do not redraw or beautify the animal.
-
-============================================================
-COORDINATES
-============================================================
-
-Coordinates must be normalized 0..100.
-
-Use [y,x].
-
-============================================================
-COMPLETE ANIMAL AUDIT
-============================================================
-
-Before returning JSON, inspect:
-
-- head
-- muzzle
-- neck
-- entire body
-- both sides of body
-- every visible ear
-- every visible leg
-- every visible foot
-- tail
-- tail tip
-- horns
-- wings
-- facial details
-- thin appendages
-
-Make sure the complete animal polygon encloses all visible
-animal pixels.
-
-============================================================
-OUTPUT
-============================================================
-
-Return ONLY valid JSON.
-
-Structure:
+Return ONLY valid JSON with this exact structure:
 
 {
-  "identified_character": "giraffe",
-
-  "locomotion_profile": {
-    "type": "quadruped",
-    "stride_multiplier": 1.0
-  },
-
-  "animal_bbox": [
-    ymin,
-    xmin,
-    ymax,
-    xmax
-  ],
-
-  "animal_polygon": [
-    [y,x],
-    [y,x]
-  ],
-
+  "identified_character": "animal_name",
+  "animal_bbox": [ymin, xmin, ymax, xmax],
+  "animal_polygon": [[y, x], [y, x]],
   "complete_animal_check": {
     "head_included": true,
     "ears_included": true,
@@ -579,65 +444,28 @@ Structure:
     "all_visible_legs_included": true,
     "small_visible_parts_included": true
   },
-
   "parts": [
-
     {
       "name": "body",
       "type": "body",
-      "polygon": [
-        [y,x],
-        [y,x]
-      ]
+      "polygon": [[y, x], [y, x]]
     },
-
     {
       "name": "front_left_leg",
       "type": "leg",
       "side": "front_left",
-
-      "polygon": [
-        [y,x],
-        [y,x]
-      ],
-
+      "polygon": [[y, x], [y, x]],
       "joints": {
-        "proximal": [y,x],
-        "middle": [y,x],
-        "distal": [y,x]
+        "proximal": [y, x],
+        "middle": [y, x],
+        "distal": [y, x]
       }
     }
-  ],
-
-  "notes": "short description"
+  ]
 }
 
-For quadrupeds use:
-
-front_left_leg
-front_right_leg
-back_left_leg
-back_right_leg
-
-If only two or three legs are actually visible,
-return only those.
-
-If no animal is visible:
-
-{
-  "identified_character": "none",
-  "animal_bbox": null,
-  "animal_polygon": [],
-  "complete_animal_check": {
-    "head_included": false,
-    "ears_included": false,
-    "tail_included": false,
-    "all_visible_legs_included": false,
-    "small_visible_parts_included": false
-  },
-  "parts": [],
-  "notes": "No clear animal detected"
-}
+For quadrupeds, use side tags: front_left_leg, front_right_leg, back_left_leg, back_right_leg.
+Identify every visible leg and joint pivot point accurately.
 """
 
     errors = []
@@ -1064,6 +892,7 @@ def leg_parts(
 def prepare_leg_sprite(
     image_bgr: np.ndarray,
     polygon: List[List[float]],
+    current_part: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
 
     h, w = image_bgr.shape[:2]
@@ -1431,9 +1260,6 @@ def prepare_animal_for_blender(
 
     for part in leg_parts(scene):
 
-        global current_part
-        current_part = part
-
         prepared = prepare_leg_sprite(
             image_bgr,
             part.get(
@@ -1441,6 +1267,7 @@ def prepare_animal_for_blender(
                 [],
             )
             or [],
+            part,
         )
 
         if prepared is not None:
@@ -1561,67 +1388,6 @@ def find_blender(
             return candidate
 
     return None
-
-
-# ============================================================
-# FRAME ALLOCATION
-# ============================================================
-
-def allocate_frames(
-    total: int,
-) -> Tuple[int, int, int, int]:
-
-    if ANIMATION_MODE == "Walk in place only":
-
-        return (
-            0,
-            total,
-            0,
-            0,
-        )
-
-    walk_n = int(
-        round(
-            total
-            * WALK_IN_FRACTION
-        )
-    )
-
-    stand_n = int(
-        round(
-            total
-            * STAND_FRACTION
-        )
-    )
-
-    merge_n = 0
-
-    if (
-        ANIMATION_MODE
-        == "White canvas → walk in → stand → merge"
-    ):
-
-        merge_n = int(
-            round(
-                total
-                * MERGE_FRACTION
-            )
-        )
-
-    intro_n = max(
-        0,
-        total
-        - walk_n
-        - stand_n
-        - merge_n,
-    )
-
-    return (
-        intro_n,
-        walk_n,
-        stand_n,
-        merge_n,
-    )
 
 
 # ============================================================
@@ -3030,7 +2796,7 @@ def collect_blender_frames(
 
 
 # ============================================================
-# GIF
+# GIF / MP4 / ZIP
 # ============================================================
 
 def gif_bytes(
@@ -3075,10 +2841,6 @@ def gif_bytes(
 
     return buffer.getvalue()
 
-
-# ============================================================
-# MP4
-# ============================================================
 
 def mp4_bytes(
     frames: List[np.ndarray],
@@ -3130,10 +2892,6 @@ def mp4_bytes(
     return data
 
 
-# ============================================================
-# ZIP
-# ============================================================
-
 def zip_png_frames(
     render_dir: str,
 ) -> bytes:
@@ -3179,7 +2937,7 @@ def zip_png_frames(
 
 
 # ============================================================
-# UPLOAD
+# MAIN STREAMLIT UI FLOW
 # ============================================================
 
 uploaded_file = st.file_uploader(
@@ -3191,24 +2949,12 @@ uploaded_file = st.file_uploader(
     ],
 )
 
-
 if uploaded_file is None:
-
-    st.info(
-        "Upload a hand-drawn animal image to begin."
-    )
-
+    st.info("Upload a hand-drawn animal image to begin.")
     st.stop()
 
-
-# ============================================================
-# READ IMAGE
-# ============================================================
-
 try:
-
     uploaded_bytes = uploaded_file.read()
-
     image_pil = Image.open(
         io.BytesIO(
             uploaded_bytes
@@ -3221,577 +2967,155 @@ try:
     )
 
 except Exception as exc:
-
-    st.error(
-        f"Could not read uploaded image: {exc}"
-    )
-
+    st.error(f"Could not read uploaded image: {exc}")
     st.stop()
 
-
-# ============================================================
-# GEMINI PNG
-# ============================================================
-
 gemini_buffer = io.BytesIO()
-
-image_pil.save(
-    gemini_buffer,
-    format="PNG",
-)
-
-gemini_bytes = (
-    gemini_buffer.getvalue()
-)
-
-
-# ============================================================
-# ORIGINAL + PIPELINE
-# ============================================================
+image_pil.save(gemini_buffer, format="PNG")
+gemini_bytes = gemini_buffer.getvalue()
 
 c1, c2 = st.columns(2)
 
 with c1:
-
-    st.image(
-        image_pil,
-        caption="Original drawing",
-        width="stretch",
-    )
+    st.image(image_pil, caption="Original drawing", width="stretch")
 
 with c2:
-
     st.markdown(
         """
-### 🧠 Blender animation pipeline
+### 🧠 Blender Automation Pipeline
 
-1. Gemini examines the COMPLETE animal.
-2. Tiny ears, paws, tail tips and other details are protected.
-3. Gemini identifies every actually visible leg.
-4. Gemini gives Blender anatomical proximal pivots.
-5. Original pixels are extracted from the drawing.
-6. Body and legs become separate Blender sprites.
-7. Blender gives them shallow 3D depth.
-8. Legs rotate around their anatomical pivots.
-9. Blender renders the walking animation.
-10. GIF, MP4, PNG frames and `.blend` can be exported.
+1. Gemini calculates the full creature boundaries and joint hierarchies.
+2. OpenCV segments the raw sprite cuts.
+3. A robust Python script bundles assets + geometry config.
+4. Blender processes the script automatically to animate and render frames locally.
         """
     )
-
-
-# ============================================================
-# GEMINI
-# ============================================================
 
 if st.button(
     "🔍 Analyze drawing with Gemini",
     type="primary",
     width="stretch",
 ):
-
-    with st.spinner(
-        "Gemini is inspecting the COMPLETE animal and its small parts..."
-    ):
-
+    with st.spinner("Gemini is calculating structural geometry and joint pivots..."):
         scene = analyze_scene(
             gemini_bytes,
             GEMINI_API_KEY,
         )
 
     if scene:
-
         st.session_state.scene = scene
-
         st.session_state.animal_prepared = None
-
         st.session_state.blender_result = None
-
         st.session_state.blender_frames = None
 
-
-# ============================================================
-# STOP UNTIL ANALYSIS
-# ============================================================
-
 if not st.session_state.scene:
-
     st.stop()
-
 
 scene = st.session_state.scene
 
+st.success("Detected: " + str(scene.get("identified_character", "character")))
 
-# ============================================================
-# DETECTION RESULT
-# ============================================================
-
-st.success(
-    "Detected: "
-    + str(
-        scene.get(
-            "identified_character",
-            "character",
-        )
-    )
-)
-
-with st.expander(
-    "🧬 Gemini anatomy JSON"
-):
-
+with st.expander("🧬 Gemini Anatomy JSON"):
     st.json(scene)
 
-
-# ============================================================
-# OVERLAY
-# ============================================================
-
-overlay = detection_overlay(
-    image_bgr,
-    scene,
-)
-
+overlay = detection_overlay(image_bgr, scene)
 st.image(
-    cv2.cvtColor(
-        overlay,
-        cv2.COLOR_BGR2RGB,
-    ),
-    caption=(
-        "Green = COMPLETE animal boundary | "
-        "Orange = animation parts | "
-        "Red = anatomical joints"
-    ),
+    cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB),
+    caption="Green = Animal Boundary | Orange = Limbs | Red = Joint Pivots",
     width="stretch",
 )
-
-
-# ============================================================
-# COMPLETE ANIMAL AUDIT
-# ============================================================
-
-check = (
-    scene.get(
-        "complete_animal_check",
-        {},
-    )
-    or {}
-)
-
-checks = [
-    (
-        "Head",
-        check.get(
-            "head_included",
-            False,
-        ),
-    ),
-    (
-        "Ears",
-        check.get(
-            "ears_included",
-            False,
-        ),
-    ),
-    (
-        "Tail",
-        check.get(
-            "tail_included",
-            False,
-        ),
-    ),
-    (
-        "Visible legs",
-        check.get(
-            "all_visible_legs_included",
-            False,
-        ),
-    ),
-    (
-        "Small parts",
-        check.get(
-            "small_visible_parts_included",
-            False,
-        ),
-    ),
-]
-
-cols = st.columns(
-    len(checks)
-)
-
-for col, (label, value) in zip(
-    cols,
-    checks,
-):
-
-    with col:
-
-        if value:
-
-            st.success(
-                f"✓ {label}"
-            )
-
-        else:
-
-            st.warning(
-                f"⚠ {label}"
-            )
-
-
-# ============================================================
-# PREPARE ARTWORK
-# ============================================================
 
 st.markdown("---")
+st.header("🧩 Step 2 — Prepare original artwork for Blender")
 
-st.header(
-    "🧩 Step 2 — Prepare original artwork for Blender"
-)
-
-if st.button(
-    "🛠️ Prepare body + visible limbs",
-    width="stretch",
-):
-
-    with st.spinner(
-        "Separating the original pixels for Blender..."
-    ):
-
-        prepared = (
-            prepare_animal_for_blender(
-                image_bgr,
-                scene,
-            )
-        )
+if st.button("🛠️ Prepare body + visible limbs", width="stretch"):
+    with st.spinner("Extracting layers..."):
+        prepared = prepare_animal_for_blender(image_bgr, scene)
 
     if prepared is None:
-
-        st.error(
-            "Could not prepare the animal for Blender."
-        )
-
+        st.error("Could not prepare the animal layers.")
     else:
-
-        st.session_state.animal_prepared = (
-            prepared
-        )
-
+        st.session_state.animal_prepared = prepared
         st.session_state.blender_result = None
+        st.success("✅ Layers ready for script compiler.")
 
-        st.success(
-            "✅ Body and visible limbs prepared."
-        )
-
-
-prepared = (
-    st.session_state.animal_prepared
-)
-
-
-# ============================================================
-# SHOW PREPARED DATA
-# ============================================================
+prepared = st.session_state.animal_prepared
 
 if prepared:
-
-    st.success(
-        f"Prepared {len(prepared['legs'])} visible leg(s) "
-        "for Blender."
-    )
-
-    preview_cols = st.columns(
-        min(
-            5,
-            max(
-                1,
-                len(prepared["legs"]) + 1,
-            ),
-        )
-    )
-
-    body_rgba = prepared["body"]["rgba"]
-
-    body_rgb = cv2.cvtColor(
-        body_rgba,
-        cv2.COLOR_RGBA2BGRA,
-    )
-
-    with preview_cols[0]:
-
-        st.image(
-            cv2.cvtColor(
-                body_rgb,
-                cv2.COLOR_BGRA2RGBA,
-            ),
-            caption="Body",
-            width="stretch",
-        )
-
-    for index, leg in enumerate(
-        prepared["legs"]
-    ):
-
-        column_index = min(
-            index + 1,
-            len(preview_cols) - 1,
-        )
-
-        with preview_cols[column_index]:
-
-            rgba = leg["rgba"]
-
-            st.image(
-                rgba,
-                caption=leg["name"],
-                width="stretch",
-            )
-
-
-# ============================================================
-# BLENDER STATUS
-# ============================================================
+    st.success(f"Prepared {len(prepared['legs'])} leg layers.")
 
 st.markdown("---")
+st.header("🎬 Step 3 — Create Blender Animation Script")
 
-st.header(
-    "🎬 Step 3 — Create Blender 3D animation"
-)
-
-blender_path_found = find_blender(
-    BLENDER_PATH
-)
+blender_path_found = find_blender(BLENDER_PATH)
 
 if blender_path_found:
-
-    st.success(
-        "Blender found: "
-        f"`{blender_path_found}`"
-    )
-
+    st.success(f"Blender found: `{blender_path_found}`")
 else:
+    st.warning("Blender executable not found automatically.")
 
-    st.warning(
-        "Blender was not found."
-    )
-
-    st.info(
-        "The app can still generate the Blender Python "
-        "script. Install Blender Desktop to render it."
-    )
-
-
-# ============================================================
-# CREATE BLENDER ANIMATION
-# ============================================================
-
-if st.button(
-    "🚀 Create Blender animation",
-    type="primary",
-    width="stretch",
-):
-
+if st.button("🚀 Create Blender animation", type="primary", width="stretch"):
     if prepared is None:
-
-        st.error(
-            "First click "
-            "**Prepare body + visible limbs**."
-        )
-
+        st.error("First click **Prepare body + visible limbs**.")
     elif blender_path_found is None:
-
-        st.error(
-            "Blender is not installed or its executable "
-            "path is not available."
-        )
-
+        st.error("Provide a valid Blender executable path in the sidebar.")
     else:
-
-        with st.spinner(
-            "Blender is building the 3D character and rendering..."
-        ):
-
-            result = run_blender_animation(
-                prepared
-            )
+        with st.spinner("Blender is executing the automation script..."):
+            result = run_blender_animation(prepared)
 
         if result:
+            st.session_state.blender_result = result
+            frames = collect_blender_frames(result["render_dir"])
+            st.session_state.blender_frames = frames
+            st.success(f"✅ Render finished — {len(frames)} frames generated.")
 
-            st.session_state.blender_result = (
-                result
-            )
-
-            frames = collect_blender_frames(
-                result["render_dir"]
-            )
-
-            st.session_state.blender_frames = (
-                frames
-            )
-
-            st.success(
-                f"✅ Blender finished — {len(frames)} frames rendered."
-            )
-
-
-# ============================================================
-# RESULT
-# ============================================================
-
-result = (
-    st.session_state.blender_result
-)
-
-frames = (
-    st.session_state.blender_frames
-)
+result = st.session_state.blender_result
+frames = st.session_state.blender_frames
 
 if result and frames:
-
     st.markdown("---")
+    st.header("🎥 Render Output")
 
-    st.header(
-        "🎥 Blender result"
-    )
-
-    st.success(
-        f"Rendered {len(frames)} Blender frames."
-    )
-
-    gif_data = gif_bytes(
-        frames,
-        FPS,
-    )
-
-    st.image(
-        gif_data,
-        caption="Blender-rendered animation",
-        width="stretch",
-    )
+    gif_data = gif_bytes(frames, FPS)
+    st.image(gif_data, caption="Animation Preview", width="stretch")
 
     st.download_button(
-        "⬇️ Download Blender GIF",
+        "⬇️ Download GIF",
         gif_data,
-        "blender_animal_animation.gif",
+        "animation.gif",
         "image/gif",
         width="stretch",
     )
 
-    mp4_data = mp4_bytes(
-        frames,
-        FPS,
-    )
-
+    mp4_data = mp4_bytes(frames, FPS)
     if mp4_data:
-
         st.download_button(
             "⬇️ Download MP4",
             mp4_data,
-            "blender_animal_animation.mp4",
+            "animation.mp4",
             "video/mp4",
             width="stretch",
         )
 
-    png_zip = zip_png_frames(
-        result["render_dir"]
-    )
-
-    st.download_button(
-        "⬇️ Download PNG frames",
-        png_zip,
-        "blender_animation_frames.zip",
-        "application/zip",
-        width="stretch",
-    )
-
-    blend_path = result[
-        "blend_path"
-    ]
-
-    if os.path.exists(
-        blend_path
-    ):
-
-        with open(
-            blend_path,
-            "rb",
-        ) as handle:
-
+    blend_path = result["blend_path"]
+    if os.path.exists(blend_path):
+        with open(blend_path, "rb") as handle:
             blend_data = handle.read()
-
         st.download_button(
-            "⬇️ Download Blender project (.blend)",
+            "⬇️ Download .blend Project",
             blend_data,
             "animal_animation.blend",
             "application/octet-stream",
             width="stretch",
         )
 
-    with st.expander(
-        "Blender console output"
-    ):
-
-        st.code(
-            (
-                result.get(
-                    "stdout",
-                    "",
-                )
-                or ""
-            )
-            + "\n"
-            + (
-                result.get(
-                    "stderr",
-                    "",
-                )
-                or ""
-            )
-        )
-
-
-elif result:
-
-    st.warning(
-        "Blender completed, but no PNG frames were found."
-    )
-
-
-# ============================================================
-# BLENDER SCRIPT DOWNLOAD
-# ============================================================
-
 if st.session_state.blender_script:
-
     st.markdown("---")
-
-    st.subheader(
-        "🧩 Generated Blender Python script"
-    )
-
-    st.caption(
-        "This script is self-contained: the prepared body and "
-        "limb artwork are embedded inside it. You can run it "
-        "directly with Blender Desktop."
-    )
-
+    st.subheader("🧩 Generated Standalone Blender Python Script")
     st.download_button(
-        "⬇️ Download Blender Python script",
+        "⬇️ Download Python Script",
         st.session_state.blender_script,
         "animal_blender_animation.py",
         "text/x-python",
         width="stretch",
     )
-
-
-# ============================================================
-# FOOTER
-# ============================================================
-
-st.markdown("---")
-
-st.caption(
-    "🦒 Blender 2.5D — Gemini complete-animal recognition, "
-    "original-pixel preservation, separate visible limbs, "
-    "anatomical pivots, shallow 3D depth and Blender animation."
-)
