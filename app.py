@@ -985,15 +985,8 @@ def complete_animal_mask(
         dilation=INK_DILATION,
     )
 
-    # Keep the complete Gemini polygon as a protective mask.
-    # This is important for tiny white/low-saturation parts.
     protected = animal_region.copy()
 
-    # Combine detected artwork with the complete Gemini boundary.
-    #
-    # The polygon is slightly eroded only where there is absolutely
-    # no artwork, preventing the entire interior background from
-    # becoming opaque.
     kernel = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE,
         (5, 5),
@@ -1011,7 +1004,6 @@ def complete_animal_mask(
         pixels[interior > 0],
     )
 
-    # Keep the outer boundary around all detected artwork.
     result = cv2.bitwise_or(
         result,
         cv2.bitwise_and(
@@ -1127,7 +1119,6 @@ def prepare_leg_sprite(
 
     joints = {}
 
-    # Convert Gemini joints into pixel coordinates.
     for key in (
         "proximal",
         "middle",
@@ -1228,10 +1219,6 @@ def prepare_body_sprite(
     if crop.size == 0:
         return None
 
-    # Remove the movable legs from the body.
-    #
-    # We keep a small proximal attachment area so the leg still
-    # appears connected to the torso.
     for part in leg_parts(scene):
 
         polygon = (
@@ -1251,7 +1238,6 @@ def prepare_body_sprite(
             ),
         )
 
-        # Remove most of the leg but leave a proximal area.
         joints = (
             part.get("joints")
             or {}
@@ -1640,10 +1626,6 @@ def allocate_frames(
 
 # ============================================================
 # BLENDER SCRIPT GENERATOR
-#
-# IMPORTANT:
-# This function intentionally does NOT use an f-string.
-# Therefore Blender dictionaries such as {} are safe.
 # ============================================================
 
 def generate_blender_script(
@@ -1716,21 +1698,6 @@ def generate_blender_script(
         indent=2,
     )
 
-    # --------------------------------------------------------
-    # IMPORTANT:
-    #
-    # This is a normal raw triple-quoted string.
-    # It is NOT an f-string.
-    #
-    # __CONFIG_PLACEHOLDER__ and
-    # __ASSETS_PLACEHOLDER__ are replaced afterwards.
-    #
-    # This completely avoids the previous:
-    #
-    # SyntaxError: f-string: valid expression required
-    #
-    # --------------------------------------------------------
-
     script = r'''
 import base64
 import json
@@ -1755,7 +1722,7 @@ ASSETS = __ASSETS_PLACEHOLDER__
 
 SCRIPT_DIR = os.path.dirname(
     os.path.abspath(__file__)
-)
+) if "__file__" in locals() or "__file__" in globals() else os.getcwd()
 
 OUTPUT_DIR = os.path.join(
     SCRIPT_DIR,
@@ -1978,13 +1945,11 @@ def make_image_material(
         output.inputs["Surface"],
     )
 
-    # Blender 4.x
     try:
         material.surface_render_method = "DITHERED"
     except Exception:
         pass
 
-    # Older Blender versions
     try:
         material.blend_method = "BLEND"
     except Exception:
@@ -2030,7 +1995,6 @@ image_height = float(
     CONFIG["image_height"]
 )
 
-# 1000 pixels ≈ 10 Blender units.
 PIXEL_SCALE = 0.01
 
 
@@ -2095,16 +2059,6 @@ def create_sprite_plane(
         * PIXEL_SCALE
     )
 
-    # Image coordinates:
-    #
-    # top-left     = (0,0)
-    # top-right    = (width,0)
-    # bottom-right = (width,-height)
-    # bottom-left  = (0,-height)
-    #
-    # The object's origin can therefore be placed
-    # at an anatomical pivot.
-
     vertices = [
         (-ox, -oy, 0.0),
         (width - ox, -oy, 0.0),
@@ -2149,7 +2103,6 @@ def create_sprite_plane(
         material
     )
 
-    # UV coordinates
     uv_layer = (
         mesh.uv_layers.new(
             name="UVMap"
@@ -2172,10 +2125,6 @@ def create_sprite_plane(
                 loop.index
             ].vertex_index
         ]
-
-    # --------------------------------------------------------
-    # 3D DEPTH
-    # --------------------------------------------------------
 
     solidify = obj.modifiers.new(
         "Shallow_3D_Depth",
@@ -2558,7 +2507,6 @@ for frame in range(
                     walk_n - 1
                 )
 
-            # Smooth movement into final position.
             smooth = (
                 progress
                 * progress
@@ -2860,7 +2808,7 @@ fill.data.size = 6.0
 
 
 # ============================================================
-# SAVE BLEND
+# SAVE BLEND AND RENDER (SELF-CONTAINED)
 # ============================================================
 
 blend_path = os.path.join(
@@ -2872,11 +2820,6 @@ bpy.ops.wm.save_as_mainfile(
     filepath=blend_path
 )
 
-
-# ============================================================
-# RENDER
-# ============================================================
-
 scene.render.filepath = os.path.join(
     OUTPUT_DIR,
     "frame_",
@@ -2884,23 +2827,12 @@ scene.render.filepath = os.path.join(
 
 scene.render.image_settings.file_format = "PNG"
 
+print("--- STARTING LOCAL BLENDER RENDER ---")
 bpy.ops.render.render(
     animation=True
 )
-
-
-# ============================================================
-# COMPLETE
-# ============================================================
-
-print(
-    "BLENDER_ANIMATION_COMPLETE"
-)
-
-print(
-    "OUTPUT_DIRECTORY:",
-    OUTPUT_DIR
-)
+print("--- BLENDER ANIMATION COMPLETE ---")
+print("OUTPUT_DIRECTORY:", OUTPUT_DIR)
 '''
 
     script = script.replace(
